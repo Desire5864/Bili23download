@@ -968,7 +968,7 @@ PANEL_HTML = r"""<!DOCTYPE html>
           <polyline points="22.5 4 22.5 9.5 17 9.5"/>
         </svg>
       </button>
-      <button class="ring-btn" id="ovBackupBtn" title="云端备份：立即把下载目录同步到 115 网盘" aria-label="云端备份">
+      <button class="ring-btn" id="ovBackupBtn" title="云端备份：等下载任务全部完成后自动同步到 115 网盘" aria-label="云端备份">
         <svg viewBox="0 0 24 24" fill="none" stroke="url(#icoGrad)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
           <path d="M12 13v8"/>
           <path d="M4 14.9A7 7 0 1 1 15.71 8h1.79a4.5 4.5 0 0 1 2.5 8.24"/>
@@ -1292,7 +1292,8 @@ PANEL_HTML = r"""<!DOCTYPE html>
   <header class="phead">
     <h1>云端同步</h1>
     <div class="pacts">
-      <button class="primary" id="syncBtn">☁ 立即备份</button>
+      <button class="sm" id="syncCancelBtn" hidden>取消等待</button>
+      <button class="primary" id="syncBtn">☁ 排期备份</button>
     </div>
   </header>
 
@@ -1328,9 +1329,13 @@ PANEL_HTML = r"""<!DOCTYPE html>
 
     <div class="howto-in" id="syncState"></div>
 
+    <div class="howto-in" id="syncPending"></div>
+
     <div class="howto-in">
-      <b style="color:var(--text)">备份原理：</b>点「立即备份」后，面板用上面的账号密码登录
-      <code>CloudDrive2</code>（GetToken 换 JWT），按源目录找到它自己那条备份任务，让它立刻
+      <b style="color:var(--text)">备份原理：</b>点「排期备份」后面板不立刻动手 —— 先等下载队列里
+      所有任务都跑完，再等设置里配的延迟（默认 5 分钟，在设置页「云端同步」组里改），
+      那几分钟正好留给 FFmpeg 合并与文件重命名落定，免得把半成品传上去。到点后用上面的账号密码
+      登录 <code>CloudDrive2</code>（GetToken 换 JWT），按源目录找到它自己那条备份任务，让它
       重扫一遍（BackupRestartWalkingThrough）。增量对比、冲突策略、失败重试与上传进度都归
       CD2 的备份引擎管 —— 不再是在容器里 <code>cp</code> 一份、让每个文件都变成一条传输任务。
     </div>
@@ -4012,7 +4017,7 @@ PANEL_HTML = r"""<!DOCTYPE html>
   $("logLevel").onchange = loadLogs;
   $("logLines").onchange = loadLogs;
 
-  // ---- 云端同步：CD2 配置 + 立即备份 ----
+  // ---- 云端同步：CD2 配置 + 排期备份 ----
   //
   // 备份不再走 docker exec 的逐文件复制，而是直连 CD2 的 gRPC 接口（见后端
   // util/clouddrive）：登录 → 按源目录找到它那条备份 → 让它重扫一遍。
@@ -4070,6 +4075,7 @@ PANEL_HTML = r"""<!DOCTYPE html>
     $("syncNote").textContent = note.join(" · ");
 
     renderSyncStatus(d);
+    renderSyncPending(d.pending);
   }
 
   function loadSyncConfig() {
@@ -4113,22 +4119,35 @@ PANEL_HTML = r"""<!DOCTYPE html>
   };
 
   // 云端同步页那颗和概览页右上角那颗是同一个动作，实现收在这里共用。
-  // askFirst：概览页那颗就挨在标题旁边，离手太近，误点一下就是几十 G 的上传，
-  // 所以那边多问一句；同步页自己的按钮离得远、意图明确，保持一键直发。
-  function runCloudBackup(btn, askFirst) {
-    if (askFirst && !window.confirm("立即把下载目录同步到 115 网盘？过程在后台执行，可随时回来看进度。")) {
-      return;
-    }
-
+  //
+  // 两颗都不再立刻让 CD2 重扫：先记一笔排期，等下载队列彻底安静、再等设置里那个
+  // 延迟（默认 5 分钟）才动手 —— 边下边传会把 FFmpeg 的中间产物和还没改名的文件
+  // 一起传上去。要不要弹窗问一句由设置里的「同步前弹窗确认」决定（默认关）。
+  //
+  // 弹窗开关在服务端，所以点击时得先问一次配置；顺带把延迟分钟数取回来，好把
+  // "还要等多久"写进提示 —— 否则用户点完只看到一句"已排期"，不知道在等什么。
+  function runCloudBackup(btn) {
     var label = btn ? btn.textContent : "";
 
-    if (btn) {
-      btn.disabled = true;
-      if (btn.id === "syncBtn") btn.textContent = "☁ 备份中…";
-    }
+    if (btn) btn.disabled = true;
 
-    post("api/panel/sync", {}).then(function (d) {
-      toast(d.message || "云端备份已触发");
+    get("api/panel/sync_config").then(function (d) {
+      var minutes = d.delay_minutes || 0;
+
+      var question = minutes
+        ? "把下载目录同步到 115 网盘？会等当前下载任务全部完成，再等 " + minutes + " 分钟才开传。过程在后台执行，可随时回来看进度。"
+        : "把下载目录同步到 115 网盘？会等当前下载任务全部完成后开传。过程在后台执行，可随时回来看进度。";
+
+      if (d.confirm && !window.confirm(question)) return null;
+
+      if (btn && btn.id === "syncBtn") btn.textContent = "☁ 排队中…";
+
+      return post("api/panel/sync", {});
+    }).then(function (d) {
+      if (!d) return;
+
+      toast(d.message || "已排期云端备份");
+      renderSyncPending(d.pending);
     }).catch(function (e) {
       if (e.message !== "unauthorized") toast(e.message);
     }).then(function () {
@@ -4139,7 +4158,103 @@ PANEL_HTML = r"""<!DOCTYPE html>
     });
   }
 
-  $("syncBtn").onclick = function () { runCloudBackup(this, false); };
+  // 排期状态那块。倒计时在前端走：服务端不为它开高频接口 —— 否则每秒都要越过
+  // 一次登录鉴权，去问一个只存在于内存里的数
+  var syncCountdown = null;
+
+  function fmtRemaining(seconds) {
+    seconds = Math.max(0, Math.round(seconds || 0));
+
+    if (seconds < 60) return seconds + " 秒";
+
+    var minutes = Math.floor(seconds / 60);
+    var rest = seconds % 60;
+
+    return minutes + " 分" + (rest ? " " + rest + " 秒" : "");
+  }
+
+  // 排期那次执行的结果。它是后台跑的，失败时用户不在场 —— 不把结果带回来，
+  // 页面上就只剩"点过、等过、什么都没发生"
+  function syncResultText(last) {
+    if (!last) return "";
+
+    var when = last.at ? new Date(last.at * 1000).toLocaleTimeString() : "";
+
+    if (last.ok) return "　上次同步（" + esc(when) + "）：" + esc(last.message || "已触发");
+
+    return "　上次同步（" + esc(when) + "）失败：" + esc(last.message || "原因没记下来");
+  }
+
+  function renderSyncPending(pending) {
+    var box = $("syncPending");
+    var cancel = $("syncCancelBtn");
+
+    if (!box) return;
+
+    if (syncCountdown) {
+      clearInterval(syncCountdown);
+      syncCountdown = null;
+    }
+
+    pending = pending || {};
+
+    // 取消按钮只在真有排期时出现 —— 一直摆着会让人以为"排队中"是个常态
+    if (cancel) cancel.hidden = !pending.armed;
+
+    if (!pending.armed) {
+      box.innerHTML = "<b style='color:var(--text)'>排期：</b>没有等待中的同步。"
+        + "点上面那颗按钮后，面板会等下载任务全部跑完、再等 " + (pending.delay_minutes || 0)
+        + " 分钟才让 CD2 重扫（延迟在设置页「云端同步」组里改）。"
+        + syncResultText(pending.last_result);
+      return;
+    }
+
+    if (pending.waiting_queue) {
+      box.innerHTML = "<b style='color:var(--text)'>排期：</b>已排队 —— 正在等下载任务全部完成，"
+        + "完成后再等 " + Math.round(pending.delay_minutes || 0) + " 分钟开始同步。"
+        + "再点一次按钮可重新计时。" + syncResultText(pending.last_result);
+      return;
+    }
+
+    var paint = function (left) {
+      box.innerHTML = "<b style='color:var(--text)'>排期：</b>已排队 —— 下载队列已空，"
+        + fmtRemaining(left) + "后开始同步。再点一次按钮可重新计时。"
+        + syncResultText(pending.last_result);
+    };
+
+    var left = Math.max(0, Math.round(pending.seconds_left || 0));
+    paint(left);
+
+    syncCountdown = setInterval(function () {
+      left -= 1;
+
+      if (left <= 0) {
+        clearInterval(syncCountdown);
+        syncCountdown = null;
+        box.innerHTML = "<b style='color:var(--text)'>排期：</b>已到时间，正在让 CD2 重扫…";
+        return;
+      }
+
+      paint(left);
+    }, 1000);
+  }
+
+  $("syncBtn").onclick = function () { runCloudBackup(this); };
+
+  $("syncCancelBtn").onclick = function () {
+    var btn = this;
+
+    btn.disabled = true;
+
+    post("api/panel/sync_cancel", {}).then(function (d) {
+      toast(d.message || "已取消");
+      renderSyncPending(d.pending);
+    }).catch(function (e) {
+      if (e.message !== "unauthorized") toast(e.message);
+    }).then(function () {
+      btn.disabled = false;
+    });
+  };
 
   // ---------------- 通知 ----------------
 
@@ -4883,7 +4998,7 @@ PANEL_HTML = r"""<!DOCTYPE html>
     toast("已刷新");
   };
 
-  $("ovBackupBtn").onclick = function () { runCloudBackup(this, true); };
+  $("ovBackupBtn").onclick = function () { runCloudBackup(this); };
 
   function startPolling() {
     if (timer) clearInterval(timer);

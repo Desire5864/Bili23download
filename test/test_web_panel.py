@@ -17,7 +17,8 @@ from util.web.server import (
     PANEL_NAMING_SAVE_PATH, PANEL_NOTIFY_PATH, PANEL_NOTIFY_SAVE_PATH, PANEL_NOTIFY_TEST_PATH,
     PANEL_PASSWORD_PATH, PANEL_QR_POLL_PATH, PANEL_SESSION_PATH,
     PANEL_SETTINGS_PATH, PANEL_SETTINGS_SAVE_PATH, PANEL_SYNC_CONFIG_PATH,
-    PANEL_SYNC_CONFIG_SAVE_PATH, PANEL_SYNC_PATH, SESSION_COOKIE, WECOM_CALLBACK_PATH,
+    PANEL_SYNC_CANCEL_PATH, PANEL_SYNC_CONFIG_SAVE_PATH, PANEL_SYNC_PATH, SESSION_COOKIE,
+    WECOM_CALLBACK_PATH,
     PanelHTTPServer, WebPanelHandler, _tail_lines, parse_query, parse_query_token
 )
 from util.web import favorites
@@ -41,6 +42,7 @@ from util.common import wecom_callback
 from util.common.notify import NotifyError
 from util.clouddrive import CloudDriveAuthError, CloudDriveError
 from util.clouddrive import clouddrive_pb2
+from util.clouddrive import schedule
 
 from copy import deepcopy
 from http.client import HTTPConnection
@@ -3167,10 +3169,41 @@ class TestSyncApi:
     """
     云端备份接口。
 
-    它的职责只是"触发"：调 CD2 的 BackupRestartWalkingThrough 让那条备份重扫
-    一遍就返回，扫描与上传由 CD2 自己后台跑。测试里把 build_cd2_client 换掉 ——
-    否则一次测试就真的会去连 CD2 的 19798，还会顺手启动一次真实备份。
+    🔴 它**不再立刻传**：POST 只是登记一笔排期，真正动手要等下载队列彻底安静、
+    再等设置里那个延迟（见 util/clouddrive/schedule.py）。所以这一组分成两半 ——
+    接口测「排期记下了没有、能不能撤」，背后那个真身函数测「对 CD2 说清楚了没有」。
+
+    真身那一半把 build_cd2_client 换掉：否则一次测试就真的会去连 CD2 的 19798，
+    还会顺手触发一次真实备份。
     """
+
+    @pytest.fixture(autouse = True)
+    def quiet_scheduler(self, monkeypatch):
+        """
+        排期器是模块级单例，这里把它摁成「不起心跳、队列永远是空的」
+
+        两个原因：心跳线程一起就停不下来、会跑到后面的用例里自己 pump；而队列探针
+        的真实实现要查任务库，为了几条断言去搭那套环境不划算。
+        """
+        def reset():
+            with schedule._LOCK:
+                schedule._clear()
+                schedule._STATE["last_result"] = None
+
+        reset()
+        monkeypatch.setattr(schedule, "_ensure_thread", lambda: None)
+        monkeypatch.setattr(schedule, "_is_busy", lambda: False)
+
+        yield
+
+        reset()
+
+    def page(self, panel):
+        status, raw = request(panel, "GET", "/")
+
+        assert status == 200
+
+        return raw.decode("utf-8")
 
     def fake_client(self, monkeypatch, backup = None, tmp_path = None):
         client = FakeCd2Client(backup)
@@ -3187,10 +3220,13 @@ class TestSyncApi:
 
         return client
 
+    # ---- 接口这一半：只排期，不动手 ----
+
     def test_requires_login(self, panel):
         assert request(panel, "POST", PANEL_SYNC_PATH, body = b"{}")[0] == 401
 
-    def test_token_can_trigger(self, panel, monkeypatch):
+    def test_the_button_only_schedules(self, panel, monkeypatch):
+        """点一下不许当场开传：下载还在跑时扫到的目录里全是半成品"""
         client = self.fake_client(monkeypatch, backup = make_backup_entry())
 
         status, raw = request(panel, "POST", PANEL_SYNC_PATH, body = b"{}", token = TOKEN)
@@ -3200,47 +3236,131 @@ class TestSyncApi:
         data = json.loads(raw)
 
         assert data["ok"] is True
-        assert web_server.SYNC_SOURCE in data["message"]
+        assert data["pending"]["armed"] is True
+        assert client.restarted == [], "接口里不允许直接触发 CD2"
+
+    def test_the_message_says_what_it_is_waiting_for(self, panel, monkeypatch):
+        """只回一句「已排期」等于没说 —— 用户要知道在等什么、等多久"""
+        self.fake_client(monkeypatch, backup = make_backup_entry())
+
+        _, raw = request(panel, "POST", PANEL_SYNC_PATH, body = b"{}", token = TOKEN)
+
+        message = json.loads(raw)["message"]
+
+        assert "排期" in message
+        assert "分钟" in message or "完成" in message
+
+    def test_the_cancel_endpoint_calls_off_the_wait(self, panel, monkeypatch):
+        self.fake_client(monkeypatch, backup = make_backup_entry())
+
+        request(panel, "POST", PANEL_SYNC_PATH, body = b"{}", token = TOKEN)
+
+        status, raw = request(panel, "POST", PANEL_SYNC_CANCEL_PATH, body = b"{}", token = TOKEN)
+
+        assert status == 200
+
+        data = json.loads(raw)
+
+        assert data["pending"]["armed"] is False
+        assert data["pending"]["waiting_queue"] is False
+        assert "取消" in data["message"]
+
+    def test_cancel_requires_login(self, panel):
+        assert request(panel, "POST", PANEL_SYNC_CANCEL_PATH, body = b"{}")[0] == 401
+
+    def test_cancel_says_so_when_there_was_nothing_to_cancel(self, panel):
+        """没排期就得如实说没有，别报「已取消」让用户以为撤掉了什么"""
+        status, raw = request(panel, "POST", PANEL_SYNC_CANCEL_PATH, body = b"{}", token = TOKEN)
+
+        assert status == 200
+        assert "没有等待中" in json.loads(raw)["message"]
+
+    # ---- 真身这一半：到点之后对 CD2 说了什么 ----
+
+    def test_the_run_restarts_that_backup(self, panel, monkeypatch):
+        client = self.fake_client(monkeypatch, backup = make_backup_entry())
+
+        message = web_server.run_cloud_sync_now()
+
+        assert web_server.SYNC_SOURCE in message
 
         # 触发的是"那条备份"，不是逐文件复制
         assert client.restarted == [web_server.SYNC_SOURCE]
         assert client.closed is True
 
-    def test_missing_backup_maps_to_404(self, panel, monkeypatch):
+    def test_missing_backup_is_reported(self, panel, monkeypatch):
         """CD2 里没有这条备份时要说清楚，而不是静默什么都不做"""
         client = self.fake_client(monkeypatch, backup = None)
 
-        status, raw = request(panel, "POST", PANEL_SYNC_PATH, body = b"{}", token = TOKEN)
+        with pytest.raises(web_server.PanelError) as err:
+            web_server.run_cloud_sync_now()
 
-        assert status == 404
-        assert web_server.SYNC_SOURCE in json.loads(raw)["error"]
+        assert err.value.status == 404
+        assert web_server.SYNC_SOURCE in str(err.value)
         assert client.restarted == []
 
-    def test_unreachable_cd2_maps_to_502(self, panel, monkeypatch):
+    def test_unreachable_cd2_is_reported(self, panel, monkeypatch):
         client = self.fake_client(monkeypatch)
         client.find_error = CloudDriveError("连不上 CloudDrive2")
 
-        status, raw = request(panel, "POST", PANEL_SYNC_PATH, body = b"{}", token = TOKEN)
+        with pytest.raises(web_server.PanelError) as err:
+            web_server.run_cloud_sync_now()
 
-        assert status == 502
-        assert "连不上" in json.loads(raw)["error"]
+        assert err.value.status == 502
+        assert "连不上" in str(err.value)
 
     def test_bad_credentials_are_reported_as_such(self, panel, monkeypatch):
         client = self.fake_client(monkeypatch)
         client.find_error = CloudDriveAuthError("账号或密码不对")
 
-        status, raw = request(panel, "POST", PANEL_SYNC_PATH, body = b"{}", token = TOKEN)
+        with pytest.raises(web_server.PanelError) as err:
+            web_server.run_cloud_sync_now()
 
-        assert status == 502
-        assert "账号或密码不对" in json.loads(raw)["error"]
+        assert err.value.status == 502
+        assert "账号或密码不对" in str(err.value)
 
     def test_client_is_closed_even_when_it_fails(self, panel, monkeypatch):
         client = self.fake_client(monkeypatch)
         client.find_error = CloudDriveError("boom")
 
-        request(panel, "POST", PANEL_SYNC_PATH, body = b"{}", token = TOKEN)
+        with pytest.raises(web_server.PanelError):
+            web_server.run_cloud_sync_now()
 
         assert client.closed is True
+
+    # ---- 设置项与页面 ----
+
+    def test_the_settings_page_offers_both_switches(self):
+        keys = {field["key"] for field in web_server.SETTINGS_FIELDS}
+
+        assert "cloud_sync_confirm" in keys
+        assert "cloud_sync_delay_minutes" in keys
+
+    def test_the_page_reads_the_switch_before_asking(self, panel):
+        """
+        弹窗开关在服务端，前端必须先问一次配置再决定弹不弹
+
+        少了这一步，设置页那个开关就是个摆设 —— 页面照样按自己的默认值弹窗
+        """
+        page = self.page(panel)
+
+        assert "window.confirm" in page
+        assert "d.confirm" in page
+        assert "api/panel/sync_config" in page
+
+    def test_the_page_ships_the_queue_state_and_the_cancel(self, panel):
+        page = self.page(panel)
+
+        assert 'id="syncPending"' in page
+        assert 'id="syncCancelBtn"' in page
+        assert "api/panel/sync_cancel" in page
+
+    def test_the_old_instant_backup_copy_is_gone(self, panel):
+        """旧文案会让用户以为点了就立刻传，改完必须一起清掉"""
+        page = self.page(panel)
+
+        assert "立即把下载目录同步到" not in page
+        assert "立即备份" not in page
 
 class TestSyncConfig:
     """
@@ -3248,7 +3368,7 @@ class TestSyncConfig:
 
     配置存成 config.json 旁边的 sync.json，生效优先级：面板保存值 >
     环境变量 > 内置默认 —— 备份必须跟着这套优先级走，否则面板上改了地址、
-    点「立即备份」却还在连旧的。
+    到点那次同步却还在连旧的。
     """
 
     def patched_file(self, monkeypatch, tmp_path):
@@ -5191,12 +5311,17 @@ class TestPanelPage:
         assert '$("ovPwdBtn").onclick = openPwdGate;' in page
 
     def test_overview_backup_shares_the_cloud_sync_action(self, panel):
-        """概览页的快捷备份不另写一份请求逻辑：两个入口都归 runCloudBackup"""
+        """
+        概览页的快捷备份不另写一份请求逻辑：两个入口都归 runCloudBackup
+
+        弹不弹窗已经不由调用方写死了 —— 改由设置里那个「同步前弹窗确认」决定，
+        所以两颗按钮的调用形式现在一模一样，区别只剩外观
+        """
         page = self.page(panel)
 
         assert "function runCloudBackup(" in page
-        assert "runCloudBackup(this, true)" in page    # 概览：离手近，先问一句
-        assert "runCloudBackup(this, false)" in page   # 同步页：原样直发
+        assert page.count("runCloudBackup(this);") == 2, "两个入口共用同一份实现"
+        assert "runCloudBackup(this, true)" not in page, "弹窗与否不该再由调用点写死"
 
     def test_sync_page_is_wired_to_the_config_endpoints(self, panel):
         """云端同步页：CD2 连接信息与凭据的读写接口都要在页面里接上"""

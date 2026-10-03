@@ -513,6 +513,21 @@ class APPConfig(QConfig):
     web_panel_password = ConfigItem("Web Panel", "web_panel_password", "")
     web_panel_token = ConfigItem("Web Panel", "web_panel_token", "")
 
+    # Cloud Sync
+    # 面板触发云端备份时的两个行为参数，都与"什么时候真的开始传"有关。
+    #
+    # 为什么不点一下就传：下载还在跑的时候去扫目录，扫到的是一堆半成品 ——
+    # FFmpeg 还没合并完、文件还没按命名规则改名，CD2 把这些中间态传上去，等
+    # 收尾完成还得再传一遍，白跑一趟带宽。所以改成排期：等下载队列彻底安静
+    # 下来、再等下面这个延迟，才让 CD2 重扫。
+    #
+    # confirm 单拎出来是因为概览页右上角那颗按钮紧挨着标题，误点一下就是几十 G
+    # 的上传，多问一句划算。默认关：既然已经改成排期了，前面还有好几道缓冲，
+    # 再拦一道显得啰嗦，想去掉弹窗直接执行的话不必先去设置里找开关。
+    cloud_sync_confirm = ConfigItem("CloudSync", "cloud_sync_confirm", False, BoolValidator())
+    # 单位是分钟，0 表示"队列一空就传"。给到 120 是因为有人喜欢攒一整晚再传
+    cloud_sync_delay_minutes = RangeConfigItem("CloudSync", "cloud_sync_delay_minutes", 5, RangeValidator(0, 120))
+
     # Update
     include_prerelease = ConfigItem("Update", "include_prerelease", False, BoolValidator())
 

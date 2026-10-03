@@ -1002,6 +1002,20 @@ def _batch_still_running() -> bool:
     return False
 
 
+def downloads_still_running() -> bool:
+    """
+    下载队列里还有任务在跑吗 —— `_batch_still_running` 的对外公开名
+
+    完成通知与云端同步的排期共用它，**必须是同一套判据**：不然会出现「通知已经
+    发出一批完成了、同步却还认为队列在跑」这种自相矛盾的状态，而且两边都不报错，
+    只能靠人肉对时间才发现。
+
+    暂停与失败**不算**在跑 —— 一个暂停的任务可能一停一整夜，把同步永远扣在
+    队列里没有任何意义（这条与通知那边同源，也正是共用一个函数的原因）。
+    """
+    return _batch_still_running()
+
+
 def _arm_timer():
     """起一个静默期计时器。调用方负责持有 _PENDING_LOCK"""
     global _TIMER
