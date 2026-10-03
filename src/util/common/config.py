@@ -402,10 +402,18 @@ class APPConfig(QConfig):
     download_parallel = RangeConfigItem("Download", "download_parallel", 1, RangeValidator(1, 10))
 
     # 同时进行 FFmpeg 处理（合并 / 转换）的任务数。原先在调度器里硬编码为 1，用户
-    # 2026-10-02 要求能同时跑 2 个。之所以保守，是因为 CONVERTING 是重编码而不是
-    # 封装拷贝，会实打实吃满 CPU；上限给到 4，够用又不至于把机器拖死。
-    # 每个任务的分片、清单、临时产物都带 task_id 前缀，不存在互相覆盖的问题
-    merge_parallel = RangeConfigItem("Download", "merge_parallel", 2, RangeValidator(1, 4))
+    # 2026-10-02 要求能同时跑 2 个，2026-10-03 又要求把上限放开（面板设置页可改）。
+    #
+    # 上限从 4 提到 16，**默认值仍是 2** —— 改大要用户自己动手，所以这只是一条
+    # "允许范围"，不是新默认。敢放开的理由：占绝大多数的 MERGING 是封装拷贝
+    # （-c copy，纯 IO 搬运），一整个合集几十集时并发上去能明显压缩收尾时间；
+    # 真吃 CPU 的 CONVERTING 仍受同一额度约束，用户选了重编码又开很高是自己的
+    # 选择（设置页说明文字里有提醒）。取 16 而不是 10，是为了让用户提到的 8 也
+    # 能设得进去，上限只做兜底。
+    #
+    # 并发是安全的：每个任务的分片、清单、临时产物都带 task_id 前缀，不存在互相
+    # 覆盖的问题（见 DownloadListModel._manageConcurrentMerges 的注释）
+    merge_parallel = RangeConfigItem("Download", "merge_parallel", 2, RangeValidator(1, 16))
     speed_limit_enabled = ConfigItem("Download", "speed_limit_enabled", False, BoolValidator())
     speed_limit_rate = ConfigItem("Download", "speed_limit_rate", 10.0)
 

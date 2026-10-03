@@ -77,6 +77,19 @@ def test_default_limit_is_two():
     assert config.get(config.merge_parallel) == 2
 
 
+def test_upper_bound_follows_the_users_ask():
+    """
+    上限：用户 2026-10-03 要求能在面板设置里自己往上调，从 4 放到 16。
+
+    这个数字与 server.py 的 SETTINGS_FIELDS 里那条 max 是**同一件事的两处写法**
+    （GUI 滑块读 config 的 range，网页读 SETTINGS_FIELDS），改一处漏一处会让
+    两边打架：网页放行了 16，写回时被 config 的 validator 掐回 4（或反过来，
+    滑块够不着网页允许的值）。这里先钉住 config 这一侧，网页那侧由
+    test_web_panel 的字段断言守着
+    """
+    assert config.merge_parallel.range == (1, 16)
+
+
 def test_merge_scheduler_starts_up_to_the_limit(app, monkeypatch):
     model, starter = arranged(app, monkeypatch, [DownloadStatus.FFMPEG_QUEUED] * 5, limit = 2)
 
@@ -85,10 +98,12 @@ def test_merge_scheduler_starts_up_to_the_limit(app, monkeypatch):
     assert len(starter.started) == 2
 
 
-@pytest.mark.parametrize("limit", [1, 3, 4])
+# 6、8、16 是放开上限后用户真会填进来的值：调度器必须照单全收，
+# 不能在哪一层还留着旧的 4 当暗桩（队列给足 20 条，免得是"没任务可放"混过去）
+@pytest.mark.parametrize("limit", [1, 3, 4, 6, 8, 16])
 def test_merge_scheduler_follows_the_setting(app, monkeypatch, limit):
     """换成别的值也照办，防止"写死成 2"混过去"""
-    model, starter = arranged(app, monkeypatch, [DownloadStatus.FFMPEG_QUEUED] * 6, limit = limit)
+    model, starter = arranged(app, monkeypatch, [DownloadStatus.FFMPEG_QUEUED] * 20, limit = limit)
 
     model.manageConcurrentMerges()
 

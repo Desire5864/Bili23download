@@ -1063,7 +1063,8 @@ class TestSettingsApi:
         assert fields["download_parallel"]["max"] == 10
         assert fields["merge_parallel"]["value"] == 2
         assert fields["merge_parallel"]["min"] == 1
-        assert fields["merge_parallel"]["max"] == 4
+        # 上限 2026-10-03 从 4 放到 16：用户要求能自己往上调（默认值不变）
+        assert fields["merge_parallel"]["max"] == 16
         assert fields["download_thread"]["value"] == 4
 
     def test_the_parse_auto_add_switch_is_readable(self, panel, monkeypatch):
