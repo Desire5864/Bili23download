@@ -1,0 +1,699 @@
+from PySide6.QtCore import QStandardPaths
+
+from qfluentwidgets import (
+    QConfig, RangeConfigItem, RangeValidator, OptionsValidator, OptionsConfigItem, BoolValidator,
+    ConfigItem, EnumSerializer, Theme, qconfig
+)
+
+from .serializer import LanguageSerializer, ScalingSerializer
+from .enum import (
+    Language, WhenClose, DanmakuType, SubtitleType, CoverType, MetadataType, ProxyMode, ProxyType, FFmpegSource,
+    NumberingType, Scaling, FileConflictResolution, VideoContainer, AutoSelectMode, Area, DuplicateDownloadResolution,
+    OriginalFileType
+)
+from ._json import loads, dumps_std
+from .runtime import runtime
+
+from threading import Lock
+from typing import ClassVar
+from pathlib import Path
+from copy import deepcopy
+import logging
+import sys
+import os
+
+logger = logging.getLogger(__name__)
+
+def isWin11():
+    return sys.platform == "win32" and sys.getwindowsversion().build >= 22000
+
+class DefaultValue:
+    parse_list_column: ClassVar = [
+        {
+            "attr_key": "number",
+            "width": 160,
+            "show": True
+        },
+        {
+            "attr_key": "title",
+            "width": 350,
+            "show": True
+        },
+        {
+            "attr_key": "badge",
+            "width": 90,
+            "show": True
+        },
+        {
+            "attr_key": "duration",
+            "width": 90,
+            "show": True
+        },
+        {
+            "attr_key": "dyn_time",
+            "width": 130,
+            "show": True
+        }
+    ]
+
+    auto_select_conditions: ClassVar = {
+        "user_uploads": 0,
+        "bangumi": 0,
+        "other": 0
+    }
+
+    # width 为 0 表示尚无有效记录，此时窗口按默认尺寸居中显示
+    window_state: ClassVar = {
+        "x": 0,
+        "y": 0,
+        "width": 0,
+        "height": 0,
+        "maximized": False
+    }
+
+    video_quality_priority: ClassVar = [
+        127,
+        126,
+        125,
+        122,
+        120,
+        116,
+        112,
+        100,
+        80,
+        64,
+        32,
+        16
+    ]
+
+    audio_quality_priority: ClassVar = [
+        30251,
+        30250,
+        30280,
+        30232,
+        30216
+    ]
+    
+    video_codec_priority: ClassVar = [
+        7,
+        12,
+        13
+    ]
+
+    danmaku_style: ClassVar = {
+        "font": {
+            "name": "黑体",
+            "size": 36,
+            "bold": False,
+            "italic": False,
+            "underline": False,
+            "strike": False
+        },
+        "border": {
+            "border": 1.0,
+            "shadow": 0,
+        },
+        "advanced": {
+            "display_area": 60,
+            "opacity": 80,
+            "scroll_duration": 10,
+            "static_duration": 5,
+            "minimum_gap": 100
+        },
+        "resolution": {
+            "width": 1280,
+            "height": 720
+        }
+    }
+    
+    subtitle_language: ClassVar = {
+        "download_specified": False,
+        "specified_language": []
+    }
+
+    subtitle_style: ClassVar = {
+        "font": {
+            "name": "黑体",
+            "size": 36,
+            "bold": False,
+            "italic": False,
+            "underline": False,
+            "strike": False
+        },
+        "border": {
+            "border": 1.0,
+            "shadow": 0.0,
+        },
+        "color": {
+            "primary": "&H00FFFFFF",
+            "secondary": "&H000000FF",
+            "border": "H00000000",
+            "shadow": "H00000000"
+        },
+        "margin": {
+            "left": 10,
+            "right": 10,
+            "vertical": 20
+        },
+        "resolution": {
+            "width": 1280,
+            "height": 720
+        },
+        "alignment": 2,
+
+    }
+
+    naming_rule_list: ClassVar = [
+        {
+            "id": "a024c20c-5826-4e65-a1f5-802e3e2dbe4f",
+            "name": "DEFAULT_FOR_NORMAL",
+            "type": 11,
+            "rule": "{leaf_title}",
+            "default": True
+        },
+        {
+            "id": "2d98a265-e8e1-4b2a-8133-76bbc65c90fe",
+            "name": "DEFAULT_FOR_PART",
+            "type": 12,
+            "rule": "{parent_title}/P{p}-{leaf_title}",
+            "default": True
+        },
+        {
+            "id": "307906bd-86a2-4b6b-bd75-152a8c3e280b",
+            "name": "DEFAULT_FOR_COLLECTION",
+            "type": 13,
+            "rule": "{collection_title}/{section_title}/{parent_title}/{leaf_title}",
+            "default": True
+        },
+        {
+            "id": "1fe25f91-caf0-437e-b132-c9367261ff8b",
+            "name": "DEFAULT_FOR_INTERACTIVE_VIDEO",
+            "type": 14,
+            "rule": "{parent_title}/{leaf_title}",
+            "default": True
+        },
+        {
+            "id": "b1d4e8e3-ca17-4b41-87cf-cda45254701e",
+            "name": "DEFAULT_FOR_BANGUMI",
+            "type": 20,
+            "rule": "{season_title}/{episode_title}",
+            "default": True
+        },
+        {
+            "id": "d582ec37-d8c2-44cf-bbd7-b709ea5c2042",
+            "name": "DEFAULT_FOR_CHEESE",
+            "type": 30,
+            "rule": "{series_title}/{episode_title}",
+            "default": True
+        },
+        {
+            "id": "5913e25f-0bf3-4d3c-a608-8416af778a8a",
+            "name": "DEFAULT_FOR_FAVORITE",
+            "type": 40,
+            "rule": "{favorites_owner_id}_{favorites_owner}/{favorites_name}/{parent_title}/<P{p:02d}->{leaf_title}",
+            "default": True
+        },
+        {
+            "id": "8c48ac82-14c5-4d48-9de7-225d9b53513f",
+            "name": "DEFAULT_FOR_SPACE",
+            "type": 50,
+            "rule": "{space_owner_id}_{space_owner}/{parent_title}/<P{p:02d}->{leaf_title}",
+            "default": True
+        },
+        {
+            "id": "307ccc8e-ad2f-4195-94f0-162ee9ff1ac0",
+            "name": "DEFAULT_FOR_HISTORY",
+            "type": 60,
+            "rule": "{source_title}/{parent_title}/<P{p:02d}->{leaf_title}",
+            "default": True
+        },
+        {
+            "id": "0a72a82b-5684-448e-9db1-a342de933d3e",
+            "name": "DEFAULT_FOR_WATCH_LATER",
+            "type": 70,
+            "rule": "{source_title}/{parent_title}/<P{p:02d}->{leaf_title}",
+            "default": True
+        },
+        {
+            "id": "4d28285d-65ca-4c5c-bbb3-b3b5b570c52a",
+            "name": "DEFAULT_FOR_WEEKLY",
+            "type": 80,
+            "rule": "{source_title}/{leaf_title}",
+            "default": True
+        },
+        {
+            "id": "dc77bd15-be21-4847-856e-68bb3035042f",
+            "name": "DEFAULT_FOR_AUDIO",
+            "type": 90,
+            "rule": "{source_title}/{uploader} - {leaf_title}",
+            "default": True
+        }
+    ]
+
+    # 名称识别（别名归并）表
+    #
+    # 出厂是空表 —— 这张表只做「用户显式写下的改写」，默认不动任何东西。
+    # B站把一部剧的每一季拆成彼此独立的 season，`{season_title}` 于是拿到
+    # 「西游记续集」这种并列名，`{season_number}` 则是它在 seasons 列表里的序号
+    # （央视版《四大名著》共用一份 seasons 列表，《红楼梦》会排到第 3）。
+    # 年份与 TMDB 编号更是 B站数据里没有的字段（episodes[].release_date 恒为空串）。
+    # 想把这些纠正过来，就得用户说一句「见到 A 就当它是 B」—— 见 naming_alias.py
+    naming_alias_list: ClassVar = []
+
+    # 国内 CDN 服务器列表
+    cn_cdn_server_list: ClassVar = [
+        {
+            "host": "upos-sz-mirror08c.bilivideo.com",
+            "provider": "HUAWEI"
+        },
+        {
+            "host": "upos-sz-mirrorhw.bilivideo.com",
+            "provider": "HUAWEI"
+        },
+        {
+            "host": "upos-sz-mirrorhwb.bilivideo.com",
+            "provider": "HUAWEI"
+        },
+        {
+            "host": "upos-sz-mirrorcos.bilivideo.com",
+            "provider": "TENCENT"
+        },
+        {
+            "host": "upos-sz-mirrorcosb.bilivideo.com",
+            "provider": "TENCENT"
+        },
+        {
+            "host": "upos-sz-mirrorcoso1.bilivideo.com",
+            "provider": "TENCENT"
+        },
+        {
+            "host": "upos-sz-mirrorali.bilivideo.com",
+            "provider": "ALIYUN"
+        },
+        {
+            "host": "upos-sz-mirroralib.bilivideo.com",
+            "provider": "ALIYUN"
+        }
+    ]
+    
+    # 海外 CDN 服务器列表
+    #
+    # 这里原先把 Akamai（upos-hz-mirrorakam.akamaized.net）列在首位。它作为**替换目标**
+    # 不可用：把别的 host 的签名链接改写过去，无论直连还是经代理一律返回 403，与出口
+    # 地区无关。而本列表的用途恰恰是替换 host（见 CDN.replace），留着它只会让每次海外
+    # 解析白占一个并发探测位，因此移除。
+    #
+    # 别把结论扩大化：Akamai 拒绝的是"被改写"的请求，不是 upos 链接本身 —— B 站原生
+    # 签发的 Akamai 链接实测返回 206（香港出口下 16MB 读到 10.84 Mbps）。那类链接本来
+    # 就出现在 playurl 返回值里，也不在黑名单中，作为原始候选照常参与探测
+    ov_cdn_server_list: ClassVar = [
+        {
+            "host": "upos-sz-mirroraliov.bilivideo.com",
+            "provider": "ALIYUN"
+        },
+        {
+            "host": "upos-sz-mirrorcosov.bilivideo.com",
+            "provider": "TENCENT"
+        }
+    ]
+
+class APPConfig(QConfig):
+    # APP
+    app_name = "Bili23 Downloader"
+    app_version = "2.20.0"
+    app_comparable_version = "2.20.0"
+    # 配置格式版本。**改动必须在 patch_config 里加对应的门禁并把它 +1**，
+    # 否则已有用户配置里那份副本永远不会被更新（DefaultValue 只在配置文件不存在时
+    # 作为初值）。与 app_version 不要求逐字对应
+    app_config_version = 2200
+    config_version = ConfigItem("Application", "config_version", app_config_version)
+
+    # Interface
+    language = OptionsConfigItem("Interface", "language", Language.AUTO, OptionsValidator(Language), LanguageSerializer(), restart = True)
+    display_scaling = OptionsConfigItem("Interface", "display_scaling", Scaling.AUTO, OptionsValidator(Scaling), ScalingSerializer(), restart = True)
+    mica_effect = ConfigItem("Interface", "mica_effect", False, BoolValidator())
+
+    # Behavior
+    parse_list_column = ConfigItem("Behavior", "parse_list_column", DefaultValue.parse_list_column)
+    parse_list_alternate_row_color = ConfigItem("Behavior", "parse_list_alternate_row_color", True, BoolValidator())
+    parse_list_show_floating_command_bar = ConfigItem("Behavior", "parse_list_show_floating_command_bar", True, BoolValidator())
+
+    monitor_clipboard = ConfigItem("Behavior", "monitor_clipboard", False, BoolValidator())
+    show_download_confirmation_dialog = ConfigItem("Behavior", "show_download_confirmation_dialog", False, BoolValidator())
+    auto_select_mode = OptionsConfigItem("Behavior", "auto_select_mode_", AutoSelectMode.CONDITIONAL, OptionsValidator(AutoSelectMode), EnumSerializer(AutoSelectMode))
+    auto_select_conditions = ConfigItem("Behavior", "auto_select_conditions", DefaultValue.auto_select_conditions)
+    parse_history = ConfigItem("Behavior", "parse_history", True, BoolValidator())
+
+    downloading_list_sort_by = OptionsConfigItem("Behavior", "downloading_list_sort_by", "created_time", OptionsValidator(["created_time", "show_title", "file_size", "progress"]))
+    downloading_list_sort_ascending = ConfigItem("Behavior", "downloading_list_sort_ascending", True, BoolValidator())
+    completed_list_sort_by = OptionsConfigItem("Behavior", "completed_list_sort_by", "completed_time",OptionsValidator(["completed_time", "show_title", "file_size"]))
+    completed_list_sort_ascending = ConfigItem("Behavior", "completed_list_sort_ascending", True, BoolValidator())
+
+    silent_start = ConfigItem("Behavior", "silent_start", False, BoolValidator())
+    remember_window_state = ConfigItem("Behavior", "remember_window_state", False, BoolValidator())
+    window_state = ConfigItem("Behavior", "window_state", DefaultValue.window_state)
+    stay_on_top = ConfigItem("Behavior", "stay_on_top", False, BoolValidator())
+    when_close_window = OptionsConfigItem("Behavior", "when_close_window", WhenClose.ALWAYS_ASK, OptionsValidator(WhenClose), EnumSerializer(WhenClose))
+
+    show_download_options_dialog = ConfigItem("Behavior", "show_download_options_dialog", True, BoolValidator())
+    show_download_as_single_video_dialog = ConfigItem("Behavior", "show_download_as_single_video_dialog", True, BoolValidator())
+    show_notification = ConfigItem("Behavior", "show_notification", False, BoolValidator())
+    preallocate_file_space = ConfigItem("Behavior", "preallocate_file_space", True, BoolValidator())
+    duplicate_download_resolution = OptionsConfigItem("Behavior", "duplicate_download_resolution", DuplicateDownloadResolution.ALWAYS_ASK, OptionsValidator(DuplicateDownloadResolution), EnumSerializer(DuplicateDownloadResolution))
+    file_conflict_resolution = OptionsConfigItem("Behavior", "file_conflict_resolution", FileConflictResolution.AUTO_RENAME, OptionsValidator(FileConflictResolution), EnumSerializer(FileConflictResolution))
+
+    # Notification —— 下载完成/失败时推送到企业微信与 Telegram。
+    # 容器版常年无人值守，"下完了说一声"才是刚需；桌面版也能用（提醒不嫌多）。
+    #
+    # 企业微信走**自建应用**（企业 ID + AgentId + 应用 Secret），不是群机器人
+    # webhook：机器人只能发到它所在的那个群，且 webhook 里的 key 一泄露就是
+    # 永久有效；应用凭据可吊销，也能点名发给指定成员。
+    # 🔴 secret 与 bot token 这两个凭据写在 server.py 的 SENSITIVE_CONFIG_KEYS 里：
+    # 导出脱敏、导入拒收。proxy 是 HTTP 代理（Telegram 在国内必须走），
+    # wecom_api_base 是 API 中转基地址（为了固定出口 IP），两者不是一回事
+    notification_wecom_enabled = ConfigItem("Notification", "notification_wecom_enabled", False, BoolValidator())
+    notification_wecom_corp_id = ConfigItem("Notification", "notification_wecom_corp_id", "")
+    notification_wecom_agent_id = ConfigItem("Notification", "notification_wecom_agent_id", "")
+    notification_wecom_secret = ConfigItem("Notification", "notification_wecom_secret", "")
+    notification_wecom_touser = ConfigItem("Notification", "notification_wecom_touser", "")
+    notification_wecom_api_base = ConfigItem("Notification", "notification_wecom_api_base", "")
+
+    # 回调（接收消息）。与上面那组是**两个方向**：上面是我们主动推给企微，
+    # 这里是企微推给我们。因此多一份 Token 与 EncodingAESKey —— 企微后台
+    # 「接收消息服务器配置」里填的就是这两个值加一个 URL。
+    #
+    # callback_base 是"面板在外网的地址"，只为把完整回调 URL 呈现给用户复制：
+    # 用户从局域网 IP 打开面板时，location.origin 拼出来的地址填进企微后台
+    # 是不通的，所以允许显式指定
+    notification_wecom_callback_enabled = ConfigItem("Notification", "notification_wecom_callback_enabled", False, BoolValidator())
+    notification_wecom_callback_token = ConfigItem("Notification", "notification_wecom_callback_token", "")
+    notification_wecom_aes_key = ConfigItem("Notification", "notification_wecom_aes_key", "")
+    notification_wecom_callback_base = ConfigItem("Notification", "notification_wecom_callback_base", "")
+    notification_telegram_enabled = ConfigItem("Notification", "notification_telegram_enabled", False, BoolValidator())
+    notification_telegram_token = ConfigItem("Notification", "notification_telegram_token", "")
+    notification_telegram_chat_id = ConfigItem("Notification", "notification_telegram_chat_id", "")
+    notification_proxy = ConfigItem("Notification", "notification_proxy", "")
+    notification_on_complete = ConfigItem("Notification", "notification_on_complete", True, BoolValidator())
+    notification_on_fail = ConfigItem("Notification", "notification_on_fail", False, BoolValidator())
+
+    # Download
+    download_path = ConfigItem("Download", "download_path", QStandardPaths.writableLocation(QStandardPaths.StandardLocation.DownloadLocation))
+    download_thread = RangeConfigItem("Download", "download_thread", 4, RangeValidator(1, 10))
+    download_parallel = RangeConfigItem("Download", "download_parallel", 1, RangeValidator(1, 10))
+
+    # 同时进行 FFmpeg 处理（合并 / 转换）的任务数。原先在调度器里硬编码为 1，用户
+    # 2026-10-02 要求能同时跑 2 个。之所以保守，是因为 CONVERTING 是重编码而不是
+    # 封装拷贝，会实打实吃满 CPU；上限给到 4，够用又不至于把机器拖死。
+    # 每个任务的分片、清单、临时产物都带 task_id 前缀，不存在互相覆盖的问题
+    merge_parallel = RangeConfigItem("Download", "merge_parallel", 2, RangeValidator(1, 4))
+    speed_limit_enabled = ConfigItem("Download", "speed_limit_enabled", False, BoolValidator())
+    speed_limit_rate = ConfigItem("Download", "speed_limit_rate", 10.0)
+
+    # 任务级自动重试（Issue #469）。只对网络类可重试错误生效，403/404 这类永久错误
+    # 仍直接进终态，因此默认开启是安全的 —— 网络差的用户不必先去设置里找开关。
+    # 退避节奏写死在 Downloader 里，不在这里暴露：它与分片级重试是两层概念
+    auto_retry_enabled = ConfigItem("Download", "auto_retry_enabled", True, BoolValidator())
+    auto_retry_max_count = RangeConfigItem("Download", "auto_retry_max_count", 5, RangeValidator(1, 20))
+
+    video_quality_priority = ConfigItem("Download", "video_quality_priority", DefaultValue.video_quality_priority)
+    audio_quality_priority = ConfigItem("Download", "audio_quality_priority", DefaultValue.audio_quality_priority)
+    video_codec_priority = ConfigItem("Download", "video_codec_priority", DefaultValue.video_codec_priority)
+
+    video_container = OptionsConfigItem("Download", "video_container", VideoContainer.MP4, OptionsValidator(VideoContainer), EnumSerializer(VideoContainer))
+    m4a_to_mp3 = ConfigItem("Download", "m4a_to_mp3", False)
+
+    # 下载哪几路流、下完之后怎么处理。
+    #
+    # 这几个值原先放在 runtime.download 上（下载选项对话框的「本次选择」），
+    # 3cfb1a4d 把进程级运行时状态从 APPConfig 剥离时一并迁了过去，理由是
+    # 「它们只是下一个任务用什么参数的暂存」。但它们同样是用户实打实的偏好：
+    # 只想收音频的人不该每下载一个稿件都去对话框里勾一次，而对话框本身
+    # 也只有下载时才打得开。改为配置项后两个入口改的是同一份值，重启后仍保留。
+    #
+    # 单次下载仍由下载选项对话框的值固化进 TaskInfo（见 task/options.py），
+    # 改动这里不会波及已经排进队列的任务
+    download_video_stream = ConfigItem("Download", "download_video_stream", True, BoolValidator())
+    download_audio_stream = ConfigItem("Download", "download_audio_stream", True, BoolValidator())
+    merge_video_audio = ConfigItem("Download", "merge_video_audio", True, BoolValidator())
+    keep_original_files = ConfigItem("Download", "keep_original_files", False, BoolValidator())
+    keep_original_files_type = OptionsConfigItem("Download", "keep_original_files_type", OriginalFileType.BOTH, OptionsValidator(OriginalFileType), EnumSerializer(OriginalFileType))
+
+    # Additional
+    download_danmaku = ConfigItem("Additional", "download_danmaku", False, BoolValidator())
+    danmaku_type = OptionsConfigItem("Additional", "danmaku_type", DanmakuType.ASS, OptionsValidator(DanmakuType), EnumSerializer(DanmakuType))
+    danmaku_style = ConfigItem("Additional", "danmaku_style", DefaultValue.danmaku_style)
+    embed_danmaku = ConfigItem("Additional", "embed_danmaku", False, BoolValidator())
+    delete_danmaku_after_embed = ConfigItem("Additional", "delete_danmaku_after_embed", False, BoolValidator())
+
+    download_subtitle = ConfigItem("Additional", "download_subtitle", False, BoolValidator())
+    subtitle_type = OptionsConfigItem("Additional", "subtitle_type", SubtitleType.ASS, OptionsValidator(SubtitleType), EnumSerializer(SubtitleType))
+    subtitle_language = ConfigItem("Additional", "subtitle_language", DefaultValue.subtitle_language)
+    subtitle_style = ConfigItem("Additional", "subtitle_style", DefaultValue.subtitle_style)
+    embed_subtitle = ConfigItem("Additional", "embed_subtitle", False, BoolValidator())
+    delete_subtitle_after_embed = ConfigItem("Additional", "delete_subtitle_after_embed", False, BoolValidator())
+
+    download_cover = ConfigItem("Additional", "download_cover", False, BoolValidator())
+    cover_type = OptionsConfigItem("Additional", "cover_type", CoverType.JPG, OptionsValidator(CoverType), EnumSerializer(CoverType))
+    attach_cover = ConfigItem("Additional", "attach_cover", False, BoolValidator())
+    delete_cover_after_attach = ConfigItem("Additional", "delete_cover_after_attach", False, BoolValidator())
+
+    embed_chapter = ConfigItem("Additional", "embed_chapter", False, BoolValidator())
+
+    download_metadata = ConfigItem("Additional", "download_metadata", False, BoolValidator())
+    metadata_type = OptionsConfigItem("Additional", "metadata_type", MetadataType.NFO, OptionsValidator(MetadataType), EnumSerializer(MetadataType))
+
+    # File Naming
+    naming_rule_list = ConfigItem("File Naming", "naming_rule_list", DefaultValue.naming_rule_list)
+    naming_alias_list = ConfigItem("File Naming", "naming_alias_list", DefaultValue.naming_alias_list)
+    numbering_type = OptionsConfigItem("File Naming", "numbering_type", NumberingType.CONTINUOUS, OptionsValidator(NumberingType), EnumSerializer(NumberingType))
+
+    # Advanced
+    prefer_cdn_server_provider = ConfigItem("Advanced", "prefer_cdn_server_provider_", True, BoolValidator())
+    area = OptionsConfigItem("Advanced", "area", Area.CN, OptionsValidator(Area), EnumSerializer(Area))
+    cn_cdn_server_list = ConfigItem("Advanced", "cn_cdn_server_list", DefaultValue.cn_cdn_server_list)
+    ov_cdn_server_list = ConfigItem("Advanced", "ov_cdn_server_list", DefaultValue.ov_cdn_server_list)
+
+    ffmpeg_source = OptionsConfigItem("Advanced", "ffmpeg_source", FFmpegSource.BUNDLED, OptionsValidator(FFmpegSource), EnumSerializer(FFmpegSource), restart = True)
+    custom_ffmpeg_path = ConfigItem("Advanced", "custom_ffmpeg_path", "", restart = True)
+
+    proxy_mode = OptionsConfigItem("Advanced", "proxy_mode", ProxyMode.SYSTEM, OptionsValidator(ProxyMode), EnumSerializer(ProxyMode), restart = True)
+    proxy_type = OptionsConfigItem("Advanced", "proxy_type", ProxyType.HTTP, OptionsValidator(ProxyType), EnumSerializer(ProxyType))
+    proxy_server = ConfigItem("Advanced", "proxy_server", "")
+    proxy_port = ConfigItem("Advanced", "proxy_port", 80)
+    proxy_uname = ConfigItem("Advanced", "proxy_uname", "")
+    proxy_password = ConfigItem("Advanced", "proxy_password", "")
+
+    user_agent = ConfigItem("Advanced", "user_agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36 Edg/147.0.0.0")
+
+    # MCP
+    # 默认关闭。开启后会在本地环回地址上监听一个 HTTP 端点，供 AI 客户端调用，
+    # 必须由用户显式启用，且访问需要携带 mcp_token。
+    # 容器部署时环回地址对外不可达，可用环境变量 BILI23_MCP_HOST 放开监听地址，
+    # 见 util/mcp/server.py 的 resolve_bind_host()
+    mcp_enabled = ConfigItem("MCP", "mcp_enabled", False, BoolValidator())
+    mcp_port = RangeConfigItem("MCP", "mcp_port", 23330, RangeValidator(1024, 65535))
+    mcp_token = ConfigItem("MCP", "mcp_token", "")
+
+    # Web Panel
+    # 默认关闭。开启后在内置端口上提供一个网页：登录面板、看下载队列与进度、
+    # 解析链接、建下载任务、扫码授权 B 站账号。它面向人，MCP 面向 AI 客户端，
+    # 两者相互独立，可以只开其中一个。
+    #
+    # 两道门是分开的：进网页用 web_panel_username / web_panel_password
+    # （默认 admin / password，密码存的是 PBKDF2 哈希，在面板里改）；
+    # 下载用哪个 B 站账号则由扫码登录决定。web_panel_token 是留给脚本与
+    # 自动化的免登录令牌 —— 它不方便先登录换 Cookie，两者任一有效即可调接口。
+    #
+    # 容器部署时同样可用环境变量 BILI23_WEB_HOST 放开监听地址，
+    # 见 util/common/net.py 的 resolve_bind_host()
+    web_panel_enabled = ConfigItem("Web Panel", "web_panel_enabled", False, BoolValidator())
+    web_panel_port = RangeConfigItem("Web Panel", "web_panel_port", 23331, RangeValidator(1024, 65535))
+    web_panel_username = ConfigItem("Web Panel", "web_panel_username", "admin")
+    # 留空表示"还没设过"，首次启动时会被写成默认密码的哈希
+    web_panel_password = ConfigItem("Web Panel", "web_panel_password", "")
+    web_panel_token = ConfigItem("Web Panel", "web_panel_token", "")
+
+    # Update
+    include_prerelease = ConfigItem("Update", "include_prerelease", False, BoolValidator())
+
+    # Cookie
+    img_key = ConfigItem("Cookie", "img_key", "")
+    sub_key = ConfigItem("Cookie", "sub_key", "")
+
+    bili_jct = ConfigItem("Cookie", "bili_jct", "")
+    DedeUserID = ConfigItem("Cookie", "DedeUserID", "")
+    DedeUserID__ckMd5 = ConfigItem("Cookie", "DedeUserID__ckMd5", "")
+    SESSDATA = ConfigItem("Cookie", "SESSDATA", "")
+
+    uuid = ConfigItem("Cookie", "uuid", "")
+    b_lsid = ConfigItem("Cookie", "b_lsid", "")
+    b_nut = ConfigItem("Cookie", "b_nut", "")
+    bili_ticket = ConfigItem("Cookie", "bili_ticket", "")
+    bili_ticket_expires = ConfigItem("Cookie", "bili_ticket_expires", 0)
+    buvid_fp = ConfigItem("Cookie", "buvid_fp", "")
+    buvid3 = ConfigItem("Cookie", "buvid3", "")
+    buvid4 = ConfigItem("Cookie", "buvid4", "")
+    buvid_expires = ConfigItem("Cookie", "buvid_expires", 0)
+
+    is_login = ConfigItem("Cookie", "is_login", False, BoolValidator())
+
+    # Application
+    accepted_terms = ConfigItem("Application", "accepted_terms", False, BoolValidator())
+    skip_version = ConfigItem("Application", "skip_version", "")
+
+    # Misc
+    show_auto_parse_dialog = ConfigItem("Misc", "show_auto_parse_dialog", False, BoolValidator())
+    auto_add_to_download_list = ConfigItem("Misc", "auto_add_to_download_list", False, BoolValidator())
+    auto_parse_interval = ConfigItem("Misc", "auto_parse_interval", 2.0)
+
+    auto_parse_teaching_tip_shown = ConfigItem("Misc", "auto_parse_teaching_tip_shown_", False, BoolValidator())
+
+    tutorial_dialog_shown = ConfigItem("Misc", "tutorial_dialog_shown", False, BoolValidator())
+    select_area_dialog_shown = ConfigItem("Misc", "select_area_dialog_shown", False, BoolValidator())
+
+    # 写盘串行化。qfluentwidgets 的 save() 直接 open(..., "w") 覆写整个文件，没有任何保护，
+    # 而 config.set() 默认会立即触发写盘 —— 登录相关的请求回调各自跑在自己的工作线程上
+    # （cookie_manager.init_cookie_info 在启动时会并发发出三个请求），
+    # 两个线程同时打开同一个文件写入，配置会被写成互相交错的内容。
+    _save_lock = Lock()
+
+    def save(self):
+        with self._save_lock:
+            self._cfg.file.parent.mkdir(parents = True, exist_ok = True)
+
+            # 先写临时文件再原子替换。就地截断写一旦在中途被打断，留下的就是一个残缺的配置文件，
+            # 用户的全部设置随之丢失；而退出流程走的是 os._exit，不会等待仍在写盘的线程。
+            temp_path = self._cfg.file.parent / f"{self._cfg.file.name}.tmp"
+
+            try:
+                with open(temp_path, "w", encoding = "utf-8") as f:
+                    f.write(dumps_std(self._cfg.toDict(), indent = 4))
+
+                os.replace(temp_path, self._cfg.file)
+
+            except Exception:
+                logger.exception("保存配置文件失败")
+
+                try:
+                    temp_path.unlink(missing_ok = True)
+
+                except OSError:
+                    # 临时文件清理失败不影响主流程，下次保存会覆盖它
+                    pass
+
+def check_need_patch():
+    # 检查是否需要修补配置文件
+    if config_path.exists():
+        with open(config_path, "r", encoding = "utf-8") as f:
+            try:
+                data = loads(f.read())
+
+            except Exception as e:
+                data = {}
+                
+                logger.error(f"读取配置文件时发生错误：{e}")
+
+            if "config_version" in data.get("Application", {}):
+                config_version = data.get("Application", {}).get("config_version", 0)
+
+                return config_version < config.app_config_version, config_version, data
+            else:
+                return True, 0, data
+    else:
+        return False, 0, {}
+
+def patch_config(config_version: int, data: dict):
+    # 配置文件修补
+    if config_version < 2130:
+        # 2.13.0 起代理设置由 proxy_enabled 开关改为 proxy_mode 三态选择。
+        # 旧版开着代理开关的迁移为手动设置，其余保持默认的跟随系统代理
+        if data.get("Advanced", {}).get("proxy_enabled"):
+            config.set(config.proxy_mode, ProxyMode.MANUAL)
+
+            logger.info("代理设置已迁移为手动设置")
+
+    if config_version < 2140:
+        # 2.14.0 起支持 SDR 增强（qn 122）。画质优先级列表是一份完整枚举，
+        # 选择画质时只遍历列表内的值，旧配置里没有 122 就永远选不中该画质；
+        # 且优先级对话框是按配置列表渲染的，缺项不仅调不了，保存后还会把它彻底丢掉。
+        # 因此这里补进列表，位置与默认值一致（HDR 之后、4K 之前），用户自定义过的顺序不受影响
+        video_quality_priority = config.get(config.video_quality_priority).copy()
+
+        if 122 not in video_quality_priority:
+            if 120 in video_quality_priority:
+                video_quality_priority.insert(video_quality_priority.index(120), 122)
+            else:
+                # 找不到 4K 作为锚点时兜底追加，至少保证该画质可被选中
+                video_quality_priority.append(122)
+
+            config.set(config.video_quality_priority, video_quality_priority)
+
+            logger.info("SDR 增强画质已补入画质优先级列表")
+
+    if config_version < 2200:
+        # 命名规则的内置默认值在本版本连着变过两次：先是改用 <> 可选段（段内变量取
+        # 空值时整段连同字面量前后缀一并丢弃 —— 个人空间、收藏夹这几类里单P与多P
+        # 混在一起，旧写法只能顾及一种形态，多P视频会丢掉稿件标题，GitHub #461），
+        # 随后又把入口标签从 {parent_title} 拆进了 {source_title}（此前这个变量
+        # 兼着「来源列表入口标签」与「稿件标题」两种含义）。
+        #
+        # 这里不再维护「旧默认值」对照表逐条比对、只替换用户没改过的那几条 ——
+        # 命名规则是用户可见、随时可改的东西，留一条已经用错变量的旧规则在配置里，
+        # 出问题时比「规则没了」更难排查。整张表换成新默认值：用户自建的规则与
+        # 改过的内置规则一并舍弃，置一个标志由主窗口起来后提示他重新设置
+        config.set(config.naming_rule_list, deepcopy(DefaultValue.naming_rule_list))
+
+        runtime.naming.rules_reset = True
+
+        logger.info("命名规则已重置为内置默认值")
+
+        # 默认海外 CDN 列表中移除了 Akamai（upos-hz-mirrorakam.akamaized.net）：
+        # 它不能作为替换目标 —— 把别的 host 的签名链接改写过去一律返回 403，与出口
+        # 地区无关（成因详见 DefaultValue.ov_cdn_server_list 上的那段说明）。
+        # 老配置里原样继承下来的那条留着，只会让每次海外解析都白占一个并发探测位
+        #
+        # 只按 host 精确匹配剔除这一条。用户自行增删或改过的其他节点一律不动 ——
+        # 这份列表在设置界面里可编辑，不能假设它还是默认值
+        ov_cdn_server_list = deepcopy(config.get(config.ov_cdn_server_list))
+
+        filtered_list = [
+            entry for entry in ov_cdn_server_list
+            if entry.get("host") != "upos-hz-mirrorakam.akamaized.net"
+        ]
+
+        if len(filtered_list) != len(ov_cdn_server_list):
+            config.set(config.ov_cdn_server_list, filtered_list)
+
+            logger.info("已从海外 CDN 服务器列表中移除 Akamai")
+
+    # 完成修补，写入新的 config_version
+    config.set(config.config_version, config.app_config_version)
+    config.save()
+
+config = APPConfig()
+config.themeMode.value = Theme.AUTO
+
+appdata_path = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.AppDataLocation)
+
+# 配置根之下的应用子目录名。桌面版不设 BILI23_APP_DIRNAME，沿用
+# %APPDATA%\Bili23 Downloader 的既有布局；容器镜像把它置空，使
+# config.json / logs / task.db 等直接落在 /config 下，不再多包一层
+# "Bili23 Downloader"（pathlib 拼接空串会静默忽略，无需特判）
+app_dirname = os.environ.get("BILI23_APP_DIRNAME", "Bili23 Downloader")
+
+appdata_dir = Path(appdata_path) / app_dirname
+
+config_path = appdata_dir / "config.json"
+
+if not config_path.exists():
+    logger.warning("配置文件不存在，将创建新配置文件")
+
+qconfig.load(config_path, config)
+
+# 判断是否需要修补配置文件
+need_patch, config_version, data = check_need_patch()
+
+if need_patch:
+    logger.info("检测到旧版本配置文件，正在进行修补")
+
+    patch_config(config_version, data)

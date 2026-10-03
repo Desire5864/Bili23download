@@ -1,0 +1,93 @@
+# Bili23 Downloader —— 容器编排示例（自包含，无 .env）
+#
+# 用法：把本文件复制成 docker-compose.yml，改掉下面标了「改成你自己的」几处，然后
+#     docker compose up -d
+# 群晖上 compose 是独立二进制、没有 `docker compose` 子命令，要写绝对路径：
+#     /usr/local/bin/docker-compose up -d
+#
+# ⚠️ 本文件是**脱敏版**：两个访问令牌在这里是占位串。真实的 docker-compose.yml
+#    已被 .gitignore 挡在仓库之外（它写着真令牌与宿主机路径），别把真值提交上来。
+#
+# 目录约定（与 README.docker.md 一致）：
+#     docker-compose.yml     本文件（唯一编排入口）
+#     README.docker.md       部署说明与常见问题
+#     data/                  持久化：config.json、日志、任务库（挂到容器 /config）
+#
+# ⚠️ 这里**故意不声明 build 段**：群晖 Container Manager 上点「构建」会把整个
+#    Dockerfile 从头跑一遍（apt 189 MB + PySide6 90 MB）。
+#    想自己构建就跑 `_nas_deploy.py build`；正常升级**不需要构建**，拉镜像即可（见下）。
+#
+# 🔁 升级：镜像发布在 ghcr.io，打 tag 即自动构建。
+#     docker compose pull && docker compose up -d
+#     要钉版本就把下面的 :latest 换成具体版本号，例如 :v1.0.1
+#
+# Web 面板：http://<宿主地址>:23331/ ，账号 admin / 初始密码 password（面板里改）。
+# MCP：http://<宿主地址>:23330/mcp ，请求头 Authorization: Bearer <MCP 令牌>。
+
+services:
+  bili23:
+    image: ghcr.io/desire5864/bili23download:latest
+    container_name: bili23
+    restart: unless-stopped
+    environment:
+      TZ: Asia/Shanghai
+      # 界面语言=Auto 时 Qt 按系统区域解析；容器里没有 locale 会回退 C/en，
+      # 档位译名等 Qt 翻译全变英文 —— 显式钉死中文
+      LANG: zh_CN.UTF-8
+      LC_ALL: zh_CN.UTF-8
+      BILI23_DOWNLOAD_PATH: /downloads
+      BILI23_MCP_HOST: 0.0.0.0
+      BILI23_WEB_HOST: 0.0.0.0
+      BILI23_MCP_ENABLED: "1"
+      BILI23_WEB_ENABLED: "1"
+      # 令牌是留给脚本与自动化的免登录入口（面板 ?token= / X-Panel-Token；
+      # MCP 走 Authorization: Bearer 头）。启动时会同步进容器配置 config.json。
+      # 改成你自己的：面板「设置 → MCP 服务器」里有生成按钮，别沿用这里的占位串
+      BILI23_MCP_TOKEN: "PUT-YOUR-OWN-MCP-TOKEN-HERE"
+      BILI23_WEB_TOKEN: "PUT-YOUR-OWN-WEB-TOKEN-HERE"
+      BILI23_WEB_USERNAME: admin
+      # 配置直接落容器 /config 下（去掉 "Bili23 Downloader" 子目录层）。
+      # 镜像 ENV 里已置空，这里显式声明一份，防配到旧镜像时退化回双层目录
+      BILI23_APP_DIRNAME: ""
+      # CloudDrive2：面板直连它的 gRPC 端口触发备份（不再经 docker.sock）。
+      # 不用这个功能时这三行连同下面的 device_token 挂载一起删掉
+      BILI23_CD2_HOST: "cd2.local"
+      BILI23_SYNC_SOURCE: "/media/videos"
+      BILI23_CD2_DEVICE_TOKEN_FILE: /etc/cd2_device_token.txt
+    ports:
+      - '23330:23330'
+      - '23331:23331'
+    volumes:
+      # 配置、日志、任务库整目录挂出 —— 容器内 /config 直达 config.json
+      # 改成你自己的
+      - ./data:/config
+      # 下载目录（宿主机路径按需改，容器内固定 /downloads）
+      - /path/to/downloads:/downloads
+      # CloudDrive2 的设备令牌（只读）。面板「云端同步」拿它直连 CD2 的 gRPC
+      # 触发备份，于是不必在面板上存 CD2 的账号密码（填了会优先用账号密码）。
+      # 🔴 不挂 docker.sock：备份走 CD2 自己的 API（见 src/util/clouddrive），
+      #    面板因此不需要宿主的 docker 控制权
+      - /path/to/clouddrive2/device_token.txt:/etc/cd2_device_token.txt:ro
+    healthcheck:
+      # 两个端口有一个在监听就算健康：可以只开 MCP，也可以只开 Web 面板
+      test:
+        - CMD-SHELL
+        - >-
+          python -c "import socket,sys;
+          alive=any(socket.socket().connect_ex(('127.0.0.1',p))==0 for p in (23331,23330));
+          sys.exit(0 if alive else 1)"
+      interval: 30s
+      timeout: 5s
+      start_period: 30s
+      retries: 3
+    ulimits:
+      nofile:
+        soft: 8192
+        hard: 8192
+    logging:
+      # 🔴 在群晖上必须用默认的 db 驱动：DSM Container Manager 的「日志」页只读
+      #    db 驱动的日志，写成 json-file 会让 UI 日志页空白（docker logs 反而正常）。
+      #    db 驱动不支持 max-size/max-file，大小由 DSM 统一管理。
+      #    非群晖环境可以换成 json-file 并自行限制大小。
+      #    排查兜底：程序自身还写 /config/logs/app.log，Web 面板「日志」页也能看。
+      driver: db

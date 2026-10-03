@@ -1,0 +1,52 @@
+# 构建上下文排除项。
+#
+# 镜像里真正需要的是 src/、bundle/、requirements.txt 与 docker/，
+# 其余都是开发期产物或与运行无关的资料 —— 让它们进入上下文既拖慢构建，
+# 又会让每一次改动 .git 或测试文件都使缓存失效。
+
+.git
+.github
+.gitignore
+.gitattributes
+.pytest_cache
+__pycache__
+**/__pycache__
+*.pyc
+*.pyo
+
+# 开发资料与文档：镜像用不到，README 另外由 docker/README.docker.md 提供
+assets
+launcher
+scripts
+test
+TODO.md
+CHANGELOG.md
+README.md
+README_en.md
+pyproject.toml
+
+# bundle 里是 Windows 版 ffmpeg.exe，对 Linux 镜像没有意义（约 10 MB）。
+# 目录本身保留 —— Dockerfile 会在其中给系统 ffmpeg 建一个软链，
+# 让「内置」与「系统」两种来源都指向同一个二进制
+bundle/*.exe
+
+# 本地构建产物
+_src
+*.patch
+*.zip
+*.png
+*.jpg
+*.tmp
+
+# 容器编排与说明：由宿主机读取，不进镜像
+docker-compose.yml
+docker-compose.example.yml
+docker/README.docker.md
+.dockerignore
+Dockerfile
+
+# 部署配置与实际数据。.env 里有访问令牌，绝不能被打进镜像；
+# data/ 是挂载出来的持久化目录，在源码仓库里就地构建时不该被复制
+.env
+.env.example
+data

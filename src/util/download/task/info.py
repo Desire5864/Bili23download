@@ -1,0 +1,239 @@
+from dataclasses import dataclass, field, fields, asdict
+from functools import lru_cache
+
+
+@lru_cache(maxsize=None)
+def _field_names(cls) -> frozenset[str]:
+    return frozenset(f.name for f in fields(cls))
+
+@dataclass
+class InfoBase:
+    def from_dict(self, data: dict) -> None:
+        field_names = _field_names(type(self))
+
+        for k, v in data.items():
+            if k in field_names:
+                setattr(self, k, v)
+
+@dataclass
+class BasicInfo(InfoBase):
+    task_id: str = ""
+    cover_id: str = ""
+    show_title: str = ""
+    created_time: int = 0
+    completed_time: int = 0
+
+@dataclass
+class FileInfo(InfoBase):
+    name: str = ""
+    
+    download_path: str = ""
+    folder: str = ""
+
+    video_file_ext: str = ""
+    audio_file_ext: str = ""
+    merge_file_ext: str = ""
+
+    relative_files: list[str] = field(default_factory = list)
+
+    # 待嵌入的字幕轨（含弹幕轨），由附加内容解析阶段登记，Merger 据此拼接 FFmpeg 命令
+    # 每项为 {"file": 相对文件名, "title": 轨道标题, "language": 语言码, "kind": "danmaku" | "subtitle"}
+    # 文件名中带有随界面语言变化的限定词和语言后缀，Merger 无法自行反推，因此必须在此登记
+    subtitle_track_list: list[dict] = field(default_factory = list)
+
+@dataclass
+class EpisodeInfo(InfoBase):
+    attribute: int = 0
+
+    aid: int = 0
+    bvid: str = ""
+    cid: int = 0
+    sid: int = 0
+    cover: str = ""
+    ep_id: int = 0
+    pubtime: int = 0
+    favtime: int = 0
+    viewtime: int = 0
+    number: str = ""
+    part_number: int = 0
+    episode_number: int = 0
+
+    leaf_title: str = ""
+    parent_title: str = ""
+    source_title: str = ""
+    section_title: str = ""
+    collection_title: str = ""
+    series_title: str = ""
+    season_title: str = ""
+    episode_title: str = ""
+
+    areas: list[str] = field(default_factory = list)
+    actors: str = ""
+    description: str = ""
+    episode_plot: str = ""
+    uploader: str = ""
+    uploader_uid: int = 0
+    uploader_face: str = ""
+    premiered: int = 0
+    poster: str = ""
+    season_id: int = 0
+    season_number: int = 0
+    styles: list[str] = field(default_factory = list)
+    rating: float = 0.0
+    rating_votes: int = 0
+    tid: int = 0
+    tid_v2: int = 0
+    url: str = ""
+    duration: int = 0
+    tags: list[str] = field(default_factory = list)
+    new_ep_status: bool = False
+
+    # 收藏夹\个人空间
+    favorites_name: str = ""
+    favorites_id: int = 0
+    favorites_owner: str = ""
+    favorites_owner_id: int = 0
+    space_owner: str = ""
+    space_owner_id: int = 0
+
+    # 会员购商城课程
+    course_id: int = 0
+    lesson_id: int = 0
+    item_id: int = 0
+    section_id: int = 0
+
+    # 其他
+    video_quality: str = ""
+    audio_quality: str = ""
+    video_codec: str = ""
+
+    # 实读字段。规则引擎取不到它们 —— 变量表里只有档位名（1080P、192K 这类），
+    # 而模板没有执行外部程序的能力。所以下载开始时的 _update_media_info() 不填，
+    # 等成品落盘、改名交付之前由 Merger 实读补上（见 ffmpeg/probe.py）。
+    #
+    # video_codec 在下载前就已按档位填好，这里读到真值后覆盖它 —— 两边写法一致
+    # （AVC / HEVC / AV1），混用也不会出现两种拼法
+    video_resolution: str = ""
+    video_dynamic_range: str = ""
+
+    audio_codec: str = ""
+    audio_channels: str = ""
+
+@dataclass
+class DownloadInfo(InfoBase):
+    # 类型相关
+    type: int = 0
+    media_type: int = 0
+
+    # 进度相关
+    speed: int = 0
+    progress: int = 0
+    total_size: int = 0
+    downloaded_size: int = 0
+    status: int = 0
+
+    # 属性相关
+    video_quality_id: int = 0
+    audio_quality_id: int = 0
+    video_codec_id: int = 0
+
+    queue: list[str] = field(default_factory = list)
+    files: dict = field(default_factory = dict)
+
+    # 合并相关
+    merge_video_audio: bool = False
+    keep_original_files: bool = False
+
+    video_parts_count: int = 0
+
+    # 显示信息
+    info_label: str = ""
+    status_label: str = ""
+
+@dataclass
+class OptionsInfo(InfoBase):
+    """
+    下载选项快照
+
+    这些选项原先要到下载过程中才去读全局设置，于是任务在队列里排队期间，
+    用户改了设置就会波及还没开始的旧任务 —— 与 download_path「建任务时即
+    固定」的设计意图相矛盾。改为在生成 TaskInfo 时一并固化。
+
+    全部默认为 None，表示这条记录没有固化过该项：旧版本创建的任务反序列化
+    后就是这个状态，读取时回落到全局设置，行为与升级前一致。**不要改成具体
+    的默认值** —— 那会让旧任务用上硬编码的值，而不是用户自己的设置。
+
+    枚举一律存 value（字符串）以保证 JSON 可序列化，读取时再转回枚举，
+    取值与转换统一收敛在 options.py 的 resolve() 里。
+    """
+    video_container: str = None
+
+    danmaku_type: str = None
+    embed_danmaku: bool = None
+    delete_danmaku_after_embed: bool = None
+
+    subtitle_type: str = None
+    embed_subtitle: bool = None
+    delete_subtitle_after_embed: bool = None
+    subtitle_language: dict = None
+
+    cover_type: str = None
+    attach_cover: bool = None
+    delete_cover_after_attach: bool = None
+
+    metadata_type: str = None
+
+    m4a_to_mp3: bool = None
+
+    keep_original_files_type: int = None
+
+@dataclass
+class NamingInfo(InfoBase):
+    """
+    命名规则快照
+
+    runtime.naming.target_rule_ids 是进程级全局，每次解析都会被重置，而下载
+    开始之后 _update_media_info() 还要拿画质信息再格式化一次文件名 —— 那时
+    读到的可能已经是别的任务选的规则了：任务 A 选了规则 X 进队列排队，用户
+    接着解析视频 B 并选了规则 Y，A 真正开始下载时文件名会按 Y 重算。
+    与 OptionsInfo 同理，在生成 TaskInfo 时就固化。
+
+    存的是**模板字符串本身**而不是 rule_id：用户完全可能在任务排队期间编辑
+    或删掉这条规则，只存 id 等于没固化。rule_id 仅作溯源信息保留。
+
+    全部默认为 None，表示这条记录没有固化过命名规则：旧版本创建的任务反序列化
+    后就是这个状态，读取时回落到按 type_id 查该类型的默认规则，行为与升级前
+    一致。**不要改成具体的默认值**。
+    """
+    rule_id: str = None
+    rule: str = None
+    type_id: int = None
+
+@dataclass
+class TaskInfo:
+    Basic: BasicInfo = field(default_factory = BasicInfo)
+    File: FileInfo = field(default_factory = FileInfo)
+    Episode: EpisodeInfo = field(default_factory = EpisodeInfo)
+    Download: DownloadInfo = field(default_factory = DownloadInfo)
+    Options: OptionsInfo = field(default_factory = OptionsInfo)
+    Naming: NamingInfo = field(default_factory = NamingInfo)
+
+    def to_dict(self):
+        return asdict(self)
+    
+    def from_dict(self, data: dict):
+        basic_data = data.get("Basic", {})
+        file_data = data.get("File", {})
+        episode_data = data.get("Episode", {})
+        download_data = data.get("Download", {})
+        # 旧版本的记录里没有 Options，取到空 dict，各项保持 None 即回落全局设置
+        options_data = data.get("Options", {})
+        # Naming 同理：旧任务没有固化过命名规则，回落到按 type_id 查默认规则
+        naming_data = data.get("Naming", {})
+
+        self.Basic.from_dict(basic_data)
+        self.File.from_dict(file_data)
+        self.Episode.from_dict(episode_data)
+        self.Download.from_dict(download_data)
+        self.Options.from_dict(options_data)
+        self.Naming.from_dict(naming_data)

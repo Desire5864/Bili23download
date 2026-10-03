@@ -1,0 +1,17 @@
+src/res linguist-generated=false
+
+# 行尾。
+#
+# 全局 core.autocrlf=true 时，Windows 上检出的文本文件会带上 CRLF。对 Python
+# 与 markdown 无所谓，但下面这几类会被 Linux 工具直接读取，CRLF 会真的坏掉：
+#   *.sh          → 容器入口脚本，shebang 带上 \r 就是 bad interpreter / exec format error
+#   Dockerfile    → 续行符前面的 \r 会被当成参数的一部分
+#   .dockerignore → 匹配串会带着 \r，规则静默失效（该排除的文件照样进构建上下文）
+# 所以按用途钉死行尾，而不依赖各人本机的 autocrlf 设置。
+*.sh text eol=lf
+Dockerfile text eol=lf
+.dockerignore text eol=lf
+
+# Windows 侧脚本反过来，必须是 CRLF
+*.bat text eol=crlf
+*.ps1 text eol=crlf

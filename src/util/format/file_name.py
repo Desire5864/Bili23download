@@ -1,0 +1,277 @@
+from ..parse.episode.tree import Attribute
+from ..download.task.info import TaskInfo
+
+from ..common.enum import ConventionType
+from ..common.config import config
+from ..common.naming_alias import apply_to_data
+
+from .time import Time
+from .rule_template import compile_rule
+
+from pathlib import Path
+from copy import deepcopy
+import re
+import logging
+
+logger = logging.getLogger(__name__)
+
+# 规则表里查不到时的最小可用规则。宁可让文件名退化成一个标题，
+# 也不能让任务带着空文件名建出来
+FALLBACK_RULE = "{leaf_title}"
+
+class FileNameFormatter:
+    def __init__(self):
+        self.type_id = None
+        self.rule = None
+        self.variable_data: dict = {}
+
+        self.attribute = None
+
+    def set_type_id(self, type_id: int):
+        self.type_id = type_id
+
+    def set_rule(self, rule: str):
+        self.rule = rule
+
+    def set_variable_data(self, data: TaskInfo | dict):
+        if isinstance(data, TaskInfo):
+            self.variable_data = self.get_variable_data_from_task_info(data)
+
+            self.type_id = self.get_type_id_from_task_info(data)
+
+        elif isinstance(data, dict):
+            # 预览路径：样本数据由 VariableListFactory.build_variable_data 构造，
+            # 键空间与运行期完全一致，不能在这里再做裁剪
+            self.variable_data = dict(data)
+
+    def format(self):
+        try:
+            if not self.rule:
+                self.rule = self.get_rule_from_config(self.type_id)
+
+            if self.attribute:
+                self.rule = self.get_special_rule()
+
+            if not self.rule:
+                # 该类型的规则被用户删光了，或是新增的类型还没迁移。
+                # 以前这里会被 get_special_rule 兜成空串，一路走到 File.name
+                # 变空、folder 变 "."，任务建得出来却没有文件名，且全程不报错
+                logger.warning("未找到 type_id = %s 对应的命名规则，已回退到 %s", self.type_id, FALLBACK_RULE)
+
+                self.rule = FALLBACK_RULE
+
+            safe_variable_data = {
+                name: self.__sanitize_component(value)
+                for name, value in self.variable_data.items()
+            }
+
+            return self.__normalize_path(compile_rule(self.rule).render(safe_variable_data))
+        
+        except Exception:
+            # logger.exception 已带上完整堆栈，无需再引用异常对象
+            logger.exception("格式化文件名时发生错误")
+
+            return None
+
+    @staticmethod
+    def __sanitize_component(value):
+        if not isinstance(value, str):
+            return value
+
+        return re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", value)
+
+    def __normalize_path(self, path_str: str):
+        if not path_str:
+            # 不能返回空串：Path("") 得到的是 "."，会让 File.name 变空、folder 变 "."，
+            # 任务建得出来却没有文件名，且全程不报错
+            return "_"
+        
+        path_str = path_str.lstrip("/\\")
+
+        path = Path(path_str)
+        normalized_parts = []
+
+        for part in path.parts:
+            cleaned_part = part.lstrip("/\\").strip(" .")
+
+            if cleaned_part:
+                normalized_parts.append(cleaned_part)
+
+        if not normalized_parts:
+            return "_"
+
+        return str(Path(*normalized_parts))
+
+    def get_special_rule(self):
+        # 查不到规则时返回 None，由 format() 统一回退 —— 这里再兜一次空串的话，
+        # "".format() 会得到空路径，反而把问题藏起来
+        rule_map = {
+            Attribute.DOWNLOAD_AS_SINGLE_VIDEO_BIT: "{leaf_title}",
+        }
+
+        for attr, rule in rule_map.items():
+            if self.attribute & attr:
+                return str(Path(rule))
+        
+        return self.rule
+        
+    def get_rule_from_config(self, type_id: int = None):
+        # 从命名规则配置中查询到对应的命名规则模板
+        for entry in config.get(config.naming_rule_list):
+            if entry["type"] == type_id and entry["default"]:
+                return entry["rule"]
+
+    def get_rule_by_id(self, rule_id: int):
+        for entry in config.get(config.naming_rule_list):
+            if entry["id"] == rule_id:
+                return entry["rule"]
+
+    def get_variable_data_from_task_info(self, task_info: TaskInfo):
+        number = task_info.Episode.number
+
+        try:
+            number = int(number)
+        except (TypeError, ValueError):
+            # “使用解析列表序号”时，某些分类的序号是文本标签。
+            # 普通命名规则仍应允许这些条目创建下载任务。
+            pass
+
+        data = {
+            "pub_time": Time.from_timestamp(task_info.Episode.pubtime),
+            "pub_ts": task_info.Episode.pubtime,
+            "create_time": Time.from_timestamp(task_info.Basic.created_time),
+            "create_ts": task_info.Basic.created_time,
+            "fav_time": Time.from_timestamp(task_info.Episode.favtime),
+            "fav_ts": task_info.Episode.favtime,
+            "last_watched_time": Time.from_timestamp(task_info.Episode.viewtime),
+            "last_watched_ts": task_info.Episode.viewtime,
+            "number": number,
+            "uploader": task_info.Episode.uploader,
+            "uploader_uid": task_info.Episode.uploader_uid,
+            "video_quality": task_info.Episode.video_quality,
+            "audio_quality": task_info.Episode.audio_quality,
+            "video_codec": task_info.Episode.video_codec,
+            "video_resolution": task_info.Episode.video_resolution,
+            "video_dynamic_range": task_info.Episode.video_dynamic_range,
+            "audio_codec": task_info.Episode.audio_codec,
+            "audio_channels": task_info.Episode.audio_channels,
+
+            "aid": task_info.Episode.aid,
+            "bvid": task_info.Episode.bvid,
+            "cid": task_info.Episode.cid,
+            "ep_id": task_info.Episode.ep_id,
+            "season_id": task_info.Episode.season_id,
+
+            "course_id": task_info.Episode.course_id,
+            "lesson_id": task_info.Episode.lesson_id,
+            "item_id": task_info.Episode.item_id,
+            "section_id": task_info.Episode.section_id,
+
+            "leaf_title": task_info.Episode.leaf_title,
+            "parent_title": task_info.Episode.parent_title,
+            "source_title": task_info.Episode.source_title,
+            "section_title": task_info.Episode.section_title,
+            "collection_title": task_info.Episode.collection_title,
+            "series_title": task_info.Episode.series_title,
+            "season_title": task_info.Episode.season_title,
+            "episode_title": task_info.Episode.episode_title,
+
+            # 这三个变量在规则里通常带数字格式说明符（{season_number:02d}），而 B 站
+            # 返回的 season_number 可能是 null —— determine_season_number 找不到匹配的
+            # season 时会返回 None，一路传到这里就是 format(None, "02d") 抛 TypeError，
+            # 整条任务**建不出来**（界面上只看到「创建下载任务失败 N 条」）。数字兜底
+            "season_number": task_info.Episode.season_number or 1,
+            "episode_number": task_info.Episode.episode_number or 0,
+            "p": task_info.Episode.part_number or 0,
+
+            "favorites_name": task_info.Episode.favorites_name,
+            "favorites_id": task_info.Episode.favorites_id,
+            "favorites_owner":task_info.Episode.favorites_owner,
+            "favorites_owner_id": task_info.Episode.favorites_owner_id,
+            "space_owner": task_info.Episode.space_owner,
+            "space_owner_id": task_info.Episode.space_owner_id,
+
+            # 名称识别填的两个变量（见 naming_alias.py）。这里必须先占住键：
+            # 键不存在时渲染会直接抛 KeyError，而"没有识别规则命中"的语义就是空串 ——
+            # 规则里写成可选段 < ({year})>，整段会随着空值一起消失。
+            # 与上面那些变量一样，**键空间恒定**是这套变量表的前提
+            "year": "",
+            "tmdb_id": ""
+        }
+
+        # 名称识别放在最后一步：它要比对的是 B站给的原始 season_title / series_title，
+        # 命中后改写 season_title / season_number 并填上 year / tmdb_id。
+        # 没配识别规则时这一步是空转（见 naming_alias.apply_to_data）
+        return apply_to_data(data)
+
+    def get_type_id_from_task_info(self, task_info: TaskInfo):
+        self.attribute = task_info.Episode.attribute
+
+        return self.get_type_id_from_attribute(task_info.Episode.attribute)
+
+    def get_type_id_from_attribute(self, attribute: int):
+        """
+        取条目该用的命名类型
+
+        表是**有序**的，遍历时第一个命中的位胜出，因此分三段排列，段间次序即优先级。
+        来源列表（收藏夹、历史记录、稍后再看、个人空间）里混着影视与课程条目，
+        解析器给它们**同时**打上来源位与媒体形态位，只靠位本身分不出该用哪条规则。
+        """
+        type_map = {
+            # 第一段：媒体形态位。影视与课程的变量集（season_title / episode_title /
+            # series_title …）与投稿视频完全不同 —— 套用来源规则的话，这些变量在
+            # 这类条目上全是空的，落盘只剩一个标题。所以它们一律走自己的规则
+            Attribute.BANGUMI_BIT: ConventionType.BANGUMI,
+            Attribute.CHEESE_BIT: ConventionType.CHEESE,
+
+            # 会员购商城课程已并入课程，属性位还留着（预览、取流、去重哈希都靠它分派，
+            # 见 __trim_download_type 等处），只有命名类型要跟着并过去。
+            #
+            # 这一行不能删：单个解析一条会员购链接时条目只带 LESSON_BIT，映射不到任何
+            # 类型就会返回 None，format() 只好回退到 FALLBACK_RULE，落盘文件名全变成
+            # {leaf_title} —— 任务建得出来、全程不报错，只是名字全错
+            Attribute.LESSON_BIT: ConventionType.CHEESE,
+
+            # 第二段：来源位。排在形态位之前，是为了让来源类型**吞下**列表里的
+            # 普通视频、分P与合集条目 —— 形态差异由命名规则的可选段在来源类型内部
+            # 消化（见 naming_convention.py 的 SUPPORTED_SHAPES）
+            Attribute.FAVLIST_BIT: ConventionType.FAVORITE,
+            Attribute.SPACE_BIT: ConventionType.SPACE,
+            Attribute.HISTORY_BIT: ConventionType.HISTORY,
+            Attribute.WATCH_LATER_BIT: ConventionType.WATCH_LATER,
+            Attribute.WEEKLY_BIT: ConventionType.WEEKLY,
+            Attribute.AUDIO_BIT: ConventionType.AUDIO,
+
+            # 第三段：结构形态位。合集排在最前 —— 二次解析会给合集里的条目补上
+            # NORMAL 或 PART（video.py 的 single_parser / pages_parser），那是它在
+            # 稿件内部的结构，改变不了「它属于某个合集」这件事，而合集列表
+            # （list.py）里的条目一概如此。归属由 {collection_title} 表达，
+            # 稿件内部的分P差异交给 {parent_title}/{leaf_title} 消化
+            Attribute.COLLECTION_BIT: ConventionType.COLLECTION,
+            Attribute.NORMAL_BIT: ConventionType.NORMAL,
+            Attribute.PART_BIT: ConventionType.PART,
+            Attribute.INTERACTIVE_BIT: ConventionType.INTERACTIVE_VIDEO,
+
+            # 兜底放在最后：没有结构形态位也没有来源位的纯投稿视频，按单个视频处理。
+            # 放在末尾才不会抢走 PART / COLLECTION 的判定，attribute 为 0 时也仍然返回 None
+            Attribute.VIDEO_BIT: ConventionType.NORMAL,
+        }
+
+        for attr, type_id in type_map.items():
+            if attribute & attr != 0:
+                return type_id
+
+    def get_rule_list_from_attribute(self, attribute: int):
+        return self.get_rule_list_from_type(self.get_type_id_from_attribute(attribute))
+
+    def get_rule_list_from_type(self, type_id: int):
+        rule_list = []
+
+        for entry in config.get(config.naming_rule_list):
+            if entry["type"] == type_id:
+                # 必须拷贝：直接返回配置里的原字典，调用方顺手改一个字段
+                # 就污染了进程内的配置对象乃至 DefaultValue
+                rule_list.append(deepcopy(entry))
+
+        return rule_list
+    

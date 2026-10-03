@@ -1,0 +1,49 @@
+name: Quality
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: quality-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"   # 与 requires-python 的下限一致
+
+      - name: Install ruff
+        run: pip install ruff==0.16.7
+
+      # 门禁：只包含无歧义的破坏性错误，当前为 0，不允许新增
+      - name: Lint (gate)
+        run: ruff check src test
+
+      # 报告层：不进门禁但值得持续可见的规则，见 pyproject 中逐条说明的理由
+      - name: Lint (advisory)
+        continue-on-error: true
+        run: ruff check src test --select BLE001 --statistics
+
+# ⚠️ 这里**故意不跑 pytest**。
+#
+# 上游那份 quality.yml 带一个 ubuntu + windows × py3.11/3.13 的测试矩阵。
+# 本仓库的测试集有大量 GUI 用例：它们在 offscreen 平台上创建真实窗口、断言
+# 控件尺寸，而尺寸取决于系统字体度量 —— 容器里（zh_CN.UTF-8 + fonts-noto-cjk）
+# 已经踩过一次「换个 locale 就有用例必红」，那还是同一批依赖的版本受控环境。
+# GitHub runner 的字体集又不一样，把矩阵搬过去只会得到长期飘红的状态，
+# 而飘红的 CI 比没有 CI 更糟 —— 没人会再看它。
+#
+# 权威的全量测试在容器里跑（见仓库外层的 work_push_tests.py --run）：
+# 环境与生产一致，1364 条用例。等哪天真需要把这套矩阵搬上 CI，
+# 得先给 runner 装齐 CJK 字体并把尺寸断言全部换成 minimumSizeHint 这一类
+# 与字体无关的判据。

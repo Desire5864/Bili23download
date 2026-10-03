@@ -1,0 +1,101 @@
+name: Publish container image
+
+# 打一个 v* 标签就自动出镜像（这是常规升级路径）。
+# 也可以在 Actions 页面手动触发 —— 用来验证还没打标签的改动也能构建成功。
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "额外打一个版本标签（例如 v1.0.2）。留空则只出 latest 与 sha-<短哈希>"
+        required: false
+        type: string
+
+# 同一时间只跑一个：镜像整体推送，两个并行构建只会互相抢带宽与缓存
+concurrency:
+  group: docker-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  REGISTRY: ghcr.io
+  # 🔴 必须全小写：容器仓库的命名规范不允许大写字母，而 GitHub 账号是
+  #    Desire5864。这里不写 ${{ github.repository_owner }}，否则会拼出
+  #    带大写的非法名字（docker 直接报 invalid reference format）
+  IMAGE: ghcr.io/desire5864/bili23download
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read      # 取源码
+      packages: write     # 推 ghcr.io —— 用内置 GITHUB_TOKEN，不需要额外 secret
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      # 镜像里装的是 x86_64 的 ffmpeg 与 PySide6 轮子，群晖也是 x86_64。
+      # 不铺 QEMU：多架构会让单次构建时间翻好几倍，当前没有 arm 目标
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to ${{ env.REGISTRY }}
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          # 用仓库内置令牌，不用个人 PAT：令牌随仓库生命周期，不会因为
+          # 谁的账号被移除而失效
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Derive tags and labels
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ${{ env.IMAGE }}
+          tags: |
+            # 推 v1.0.1 → 出 v1.0.1（版本号保持带 v 的写法，与 tag 一致）
+            type=ref,event=tag
+            # 手动填的版本标签。
+            # 🔴 `inputs.tag != ''` 单独用是错的：push 事件下 inputs 上下文
+            #    不存在，`inputs.tag` 求值为 null，而 `null != ''` 是 **true**
+            #    —— 结果会多出一行 `type=raw,value=,enable=true`，构建直接失败。
+            #    必须先限定事件类型
+            type=raw,value=${{ inputs.tag }},enable=${{ github.event_name == 'workflow_dispatch' && inputs.tag != '' }}
+            # latest 跟随最新一版。手动触发时也刷，作为打标签流程出问题时的兜底
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch' }}
+            # 每次都带一个 sha- 标签，方便回滚到任意一次构建
+            type=sha,prefix=sha-,format=short
+          labels: |
+            org.opencontainers.image.title=Bili23 Downloader
+            org.opencontainers.image.description=Bili23 Downloader 容器版（音视频参数实读 + 内置 Web 面板）
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+
+          # 覆盖 Dockerfile 的两个默认值。默认值是为国内直连设计的
+          # （阿里云镜像站），而 GitHub 的 runner 在境外、访问官方源是直连最快的
+          build-args: |
+            APT_MIRROR=
+            PIP_INDEX_URL=https://pypi.org/simple
+
+          # 构建缓存走 Actions 缓存。apt 与 pip 那两层加起来是几百 MB，
+          # 没有缓存的话每次发版都要重跑十分钟
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+          # 🔴 关掉 attestation（provenance）。默认开启时会产生一个额外的
+          #    OCI 清单，群晖 Container Manager 那套老 docker 拉下来可能
+          #    认不出该用哪个 manifest，表现为「拉取成功但镜像列表里没有它」
+          provenance: false
+          sbom: false

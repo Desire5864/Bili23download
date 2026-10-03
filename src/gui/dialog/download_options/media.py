@@ -1,0 +1,165 @@
+from PySide6.QtWidgets import QVBoxLayout
+from PySide6.QtCore import QTimer, Signal
+
+from qfluentwidgets import MessageBox
+
+from gui.dialog.download_options.card import MediaInfoCard
+from gui.component.setting import MediaOptionsCard
+from gui.component.widget.scroll import ScrollArea
+
+from util.parse.preview.info import PreviewerInfo
+from util.common.data import video_quality_map, audio_quality_map, video_codec_map
+from util.common.translator import Translator
+from util.common.signal_bus import signal_bus
+from util.common.config import config
+from util.common.runtime import runtime
+
+class MediaSettingsPage(ScrollArea):
+    # 下载内容发生变化时发出，用于刷新下载内容预览
+    preview_changed = Signal()
+
+    def __init__(self, parent = None):
+        super().__init__(parent = parent)
+
+        self.options_dialog = parent
+
+        self.init_UI()
+
+        self.init_media_info()
+
+        QTimer.singleShot(0, self.media_info_card.toggleExpand)
+
+    def init_UI(self):
+        self.media_info_card = MediaInfoCard(self.options_dialog, parent = self)
+        self.media_options_card = MediaOptionsCard(self.options_dialog, parent = self)
+        
+        main_layout = QVBoxLayout()
+        main_layout.addWidget(self.media_info_card)
+        main_layout.addWidget(self.media_options_card)
+        main_layout.addStretch()
+
+        self.setScrollLayout(main_layout)
+    
+    def connect_signals(self):
+        self.media_info_card.video_quality_widget.choice.currentIndexChanged.connect(self.on_change_video_info_choice)
+        self.media_info_card.audio_quality_widget.choice.currentIndexChanged.connect(self.on_change_audio_info_choice)
+        self.media_info_card.video_codec_widget.choice.currentIndexChanged.connect(self.on_change_video_info_choice)
+
+        self.media_info_card.video_quality_widget.custom_btn.clicked.connect(self.on_adjust_video_quality_priority)
+        self.media_info_card.audio_quality_widget.custom_btn.clicked.connect(self.on_adjust_audio_quality_priority)
+        self.media_info_card.video_codec_widget.custom_btn.clicked.connect(self.on_adjust_video_codec_priority)
+
+        self.media_options_card.download_video_stream_switch.checkedChanged.connect(self.preview_changed)
+        self.media_options_card.download_audio_stream_switch.checkedChanged.connect(self.preview_changed)
+
+    def init_media_info(self):
+        self.media_info_card.update_source_description()
+
+        self.media_info_card.update_choice_data(PreviewerInfo.video_quality_choice_data, PreviewerInfo.audio_quality_choice_data, PreviewerInfo.video_codec_choice_data)
+
+        self.on_change_video_info_choice()
+        self.on_change_audio_info_choice()
+
+        self.connect_signals()
+
+    def on_change_video_info_choice(self):
+        self.media_info_card.pre_query_video_info()
+
+        signal_bus.parse.query_video_info.emit(
+            self.media_info_card.video_quality_id,
+            self.media_info_card.video_codec_id,
+            self.media_info_card.on_query_video_info
+        )
+
+    def on_change_audio_info_choice(self):
+        self.media_info_card.pre_query_audio_info()
+
+        signal_bus.parse.query_audio_info.emit(
+            self.media_info_card.audio_quality_id,
+            self.media_info_card.on_query_audio_info
+        )
+
+    def on_save(self):
+        runtime.download.video_quality_id = self.media_info_card.video_quality_id
+        runtime.download.audio_quality_id = self.media_info_card.audio_quality_id
+        runtime.download.video_codec_id = self.media_info_card.video_codec_id
+
+        # 媒体选项存的是 config，不是 runtime —— 对话框只是它的两个入口之一，
+        # 因此同样在这里统一落盘；关掉对话框等于取消，那时不会走到这里
+        self.media_options_card.save()
+
+    def on_check(self):
+        # 只下载独立视频流会导致没有声音，提示用户确认
+        download_video = self.media_options_card.download_video_stream
+        download_audio = self.media_options_card.download_audio_stream
+        merge = self.media_options_card.merge_video_audio
+
+        if not download_audio and download_video:
+            dialog = MessageBox(
+                self.tr("Important Notice"),
+                self.tr("Downloading video only will result in a silent video.\n\nIf you intentionally need a video without audio, you may proceed. Otherwise, please also enable the audio stream."),
+                self.options_dialog
+            )
+
+            return dialog.exec()
+        
+        # 未选择合并视频和音频会导致下载两个分开的文件，提示用户确认
+        if not merge and download_video and download_audio:
+            dialog = MessageBox(
+                self.tr("Important Notice"),
+                self.tr('"Merge video and audio" is disabled. Video and audio will be downloaded as two separate files.\n\nTo get a single complete video file, please enable "Merge video and audio".'),
+                self.options_dialog
+            )
+
+            return dialog.exec()
+
+            
+        return True
+    
+    def has_media_to_download(self):
+        return (
+            self.media_options_card.download_video_stream or
+            self.media_options_card.download_audio_stream
+        )
+
+    def get_download_preview(self):
+        return {
+            "video": self.media_options_card.download_video_stream,
+            "audio": self.media_options_card.download_audio_stream
+        }
+
+    def on_adjust_video_quality_priority(self):
+        from ..setting.priority import PriorityDialog
+
+        map_reversed = {v: Translator.VIDEO_QUALITY(k) for k, v in video_quality_map.items()}
+
+        dialog = PriorityDialog(map_reversed, config.get(config.video_quality_priority), self.options_dialog)
+
+        if dialog.exec():
+            config.set(config.video_quality_priority, dialog.config_value)
+
+            self.on_change_video_info_choice()
+
+    def on_adjust_audio_quality_priority(self):
+        from ..setting.priority import PriorityDialog
+
+        map_reversed = {v: Translator.AUDIO_QUALITY(k) for k, v in audio_quality_map.items()}
+
+        dialog = PriorityDialog(map_reversed, config.get(config.audio_quality_priority), self.options_dialog)
+
+        if dialog.exec():
+            config.set(config.audio_quality_priority, dialog.config_value)
+
+            self.on_change_audio_info_choice()
+
+    def on_adjust_video_codec_priority(self):
+        from ..setting.priority import PriorityDialog
+
+        map_reversed = {v: k for k, v in video_codec_map.items()}
+
+        dialog = PriorityDialog(map_reversed, config.get(config.video_codec_priority), self.options_dialog )
+
+        if dialog.exec():
+            config.set(config.video_codec_priority, dialog.config_value)
+
+            self.on_change_video_info_choice()
