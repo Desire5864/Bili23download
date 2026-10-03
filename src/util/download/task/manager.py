@@ -565,8 +565,9 @@ class TaskManager:
         # （gui/.../list_view.py），容器版没有那份界面逻辑，挂在那里等于容器里
         # 永远不发。这条路径 downloader 与面板都要走
         #
-        # 传的是 task_info 而不是标题：notify 要从中取出合集名与集号，汇总成
-        # 「西游记 第1-25集 下载完成」一行（只给标题就只能把 25 个片名全列出来）
+        # 传的是 task_info 而不是标题：notify 要从中取出合集名、集号与年份，按合集
+        # 汇总成一块四行（剧名 / 年份 / 集数 / 状态）—— 只给标题就只能把 25 个片名
+        # 全列出来
         notify.notify_completed(task_info)
 
         if not wait:

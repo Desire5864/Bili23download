@@ -9,8 +9,8 @@
 完成通知走两段判定：一是**静默期**（BATCH_DELAY），期间每来一条就重新计时；
 二是**队列里还有任务在跑就继续等** —— 合并、后处理会让完成事件之间出现几十秒
 空档，光看静默期，一个 25 集的合集会被拆成好几条通知。两条都过了才汇总成一条，
-正文压成「西游记 第1-25集 下载完成」。这与桌面版的语义一致 —— 那边也是
-「下载列表空了才弹一次」。
+正文按合集分块，一块四行（剧名 / 年份 / 集数 / 状态）。这与桌面版的语义一致 ——
+那边也是「下载列表空了才弹一次」。
 
 本模块不碰 Qt、不碰 HTTP 服务，供两处调用：
   · util/download/task/manager.py —— 任务完成时（下载流程，非 GUI 线程）
@@ -809,29 +809,74 @@ def send_test(channel: str, values: dict = None) -> tuple:
 # ---------------------------------------------------------------------------
 # 事件入口（下载流程调用）
 
+def _alias_year(season_title: str, series_title: str) -> str:
+    """
+    去「名称识别」表里查这部剧的年份，查不到回空串
+
+    B站数据里**没有首播年份** —— ``episodes[].release_date`` 恒为空串，``{pub_time}``
+    则是该集的**上架**时间（西游记与柯南都上架于 2020，引进老片全错）。所以年份
+    唯一的离线来源就是用户在「名称识别」页自己填的那一格。查不到时通知里整行省掉
+    —— 宁可少一行，也不编一个看起来像年份的数字。
+
+    🔴 这段**绝不能抛**：它跑在下载完成的核心路径上（mark_as_completed → notify_completed），
+    一条没配规则的任务不该因为查表出问题就把整批通知弄没了。
+    🔴 entries 特意走 **notify 自己的 ``config``**（而不是让 naming_alias 去读它那份）：
+    单元测试把 ``notify.config`` 顶成了 FakeConfig，两处各持一份的话，测试就得去碰
+    真实的配置文件。
+    """
+    if not (season_title or series_title):
+        return ""
+
+    try:
+        from . import naming_alias
+
+        alias = naming_alias.match_alias(
+            {"season_title": season_title, "series_title": series_title},
+            config.get(config.naming_alias_list),
+        )
+
+    except Exception:
+        logger.exception("查询名称识别表获取年份失败，本次通知不显示年份")
+
+        return ""
+
+    if not isinstance(alias, dict):
+        return ""
+
+    return str(alias.get("year") or "").strip()
+
+
 def _completion_entry(source) -> dict:
     """
-    把一条完成事件归一成 {title, show, number}
+    把一条完成事件归一成 {title, show, number, year}
 
-    source 既可以是 TaskInfo，也可以是一个纯标题字符串。前者能拆出合集名与集号，
-    汇总时压成「西游记 第1-25集 下载完成」一行；字符串没有这些信息，只能原样
-    逐条列出来 —— 保留这条路是因为 MCP/脚本侧还有按标题调用的用法。
+    source 既可以是 TaskInfo，也可以是一个纯标题字符串。前者能拆出合集名、集号与
+    年份，汇总时拼成一块四行（剧名 / 年份 / 集数 / 状态）；字符串没有这些信息，
+    只能原样逐条列出来 —— 保留这条路是因为 MCP/脚本侧还有按标题调用的用法。
 
     合集名取 season_title、退回 series_title：柯南这类「一部作品多个 season」的，
     season_title 才是「名侦探柯南 第X季」；而央视版四大名著那种 series_title
     是个大帽子（「央视版四大名著」），拿它当合集名会把西游记和红楼梦混成一组。
+
+    年份**必须在这里当场查出来**：entry 是要被塞进待汇总队列（_PENDING）的纯 dict，
+    _compose 手上只有这些 dict、拿不到 TaskInfo —— 过了这一站就再没有 season_title
+    可查了。
     """
     if isinstance(source, str):
-        return {"title": source, "show": "", "number": 0}
+        return {"title": source, "show": "", "number": 0, "year": ""}
 
     episode = getattr(source, "Episode", None)
     basic = getattr(source, "Basic", None)
 
     show = ""
+    season_title = ""
+    series_title = ""
     number = 0
 
     if episode is not None:
-        show = (getattr(episode, "season_title", "") or getattr(episode, "series_title", "") or "").strip()
+        season_title = str(getattr(episode, "season_title", "") or "").strip()
+        series_title = str(getattr(episode, "series_title", "") or "").strip()
+        show = season_title or series_title
         # 番剧按集号，普通多 P 稿件按分 P 号 —— 两者都拿不到时退化成 0，
         # 该条就走"逐条列标题"那条路
         number = getattr(episode, "episode_number", 0) or getattr(episode, "part_number", 0) or 0
@@ -840,6 +885,7 @@ def _completion_entry(source) -> dict:
         "title": getattr(basic, "show_title", "") if basic is not None else "",
         "show": show,
         "number": int(number),
+        "year": _alias_year(season_title, series_title),
     }
 
 
@@ -871,33 +917,60 @@ def _compose(entries: list) -> str:
     """
     把待汇总的事件拼成通知正文
 
-    认得出合集的先按合集分组、集号区间压成一行；认不出的（标题字符串、
-    或拿不到集号的条目）才逐条列出，条目多时按 BATCH_MAX_TITLES 折叠。
+    认得出合集的按合集分块，一块四行：
+
+        剧名：西游记
+        年份：1986
+        集数：第1-25集（共25集）
+        状态：已完成
+
+    「年份」取自「名称识别」表，没配规则或没填年份时**整行不出现**（不留空值 ——
+    「年份：」后面空着比没有这一行更让人犯嘀咕）。认不出的（标题字符串、或拿不到
+    集号的条目）仍逐条列出，条目多时按 BATCH_MAX_TITLES 折叠：单集投稿视频本来
+    就没有集数与年份可言。
     """
-    lines = []
+    blocks = []
     grouped = {}
     loose = []
 
     for entry in entries:
-        show = entry.get("show") or ""
+        # 多 P 稿件没有 season_title，但分 P 号是齐的 —— 拿标题当合集名，一样能压成
+        # 一块，比把 20 个分 P 标题逐条列出来好读
+        key = entry.get("show") or entry.get("title") or ""
 
-        if show and entry.get("number"):
-            grouped.setdefault(show, []).append(entry["number"])
+        if key and entry.get("number"):
+            grouped.setdefault(key, []).append(entry)
 
         else:
             loose.append(entry.get("title") or "")
 
-    for show, numbers in grouped.items():
-        if text := _range_text(numbers):
-            lines.append(f"{show} 第{text}集 下载完成")
+    for key, items in grouped.items():
+        numbers = [item["number"] for item in items]
 
-    for title in loose[:BATCH_MAX_TITLES]:
-        lines.append(f"· {title}")
+        if not (span := _range_text(numbers)):
+            continue
 
-    if len(loose) > BATCH_MAX_TITLES:
-        lines.append(f"· …等 {len(loose)} 个任务")
+        lines = [f"剧名：{items[0].get('show') or key}"]
 
-    return "\n".join(lines)
+        if year := next((str(item.get("year") or "") for item in items if item.get("year")), ""):
+            lines.append(f"年份：{year}")
+
+        # 🔴 「共 N 集」与上面那个区间同源（都是去重后的集号）：有重复集号时，
+        # 拿条目数去数会得到「第1-25集（共26集）」这种自相矛盾的写法
+        lines.append(f"集数：第{span}集（共{len({int(n) for n in numbers if n})}集）")
+        lines.append("状态：已完成")
+
+        blocks.append("\n".join(lines))
+
+    if loose:
+        body = [f"· {title}" for title in loose[:BATCH_MAX_TITLES]]
+
+        if len(loose) > BATCH_MAX_TITLES:
+            body.append(f"· …等 {len(loose)} 个任务")
+
+        blocks.append("\n".join(body))
+
+    return "\n\n".join(blocks)
 
 
 def _batch_still_running() -> bool:
@@ -944,7 +1017,7 @@ def notify_completed(source, settings: dict = None):
 
     一次下载动辄几十集，逐集推会把手机刷爆；等安静下来一次性汇总成一条，
     与桌面版「下载列表空了才弹一次」是同一个语义。source 传 TaskInfo 时正文
-    汇总成「西游记 第1-25集 下载完成」，传标题字符串则原样列出。
+    按合集分块（剧名 / 年份 / 集数 / 状态），传标题字符串则原样列出。
     """
     settings = settings or load_settings()
 
@@ -1021,10 +1094,9 @@ def _flush_pending(force: bool = False):
     if not settings["on_complete"] or not channels:
         return
 
+    # 不再另起一行「共 N 个任务已完成」：每一块的「集数：…（共N集）」已经带了
+    # 这个数，两块以上也各报各的，再补一句总数只会让正文变长而不多给信息
     text = _compose(entries)
-
-    if len(entries) > 1:
-        text += f"\n共 {len(entries)} 个任务已完成。"
 
     send_to_channels(channels, settings, "B站下载完成", text)
 

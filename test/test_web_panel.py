@@ -3992,7 +3992,8 @@ class TestNotifyBatching:
 
         assert len(sent) == 1
         assert "第5集" in sent[0][1]
-        assert "共 5 个任务已完成" in sent[0][1]
+        # 拿不到合集名/集号的（这里是纯标题字符串）仍逐条列出，一条都没丢
+        assert "· 西游记 第5集" in sent[0][1]
 
     def test_the_title_list_is_capped(self, monkeypatch):
         """几百集的任务不能撑出一条谁都读不完的消息"""
@@ -4006,9 +4007,9 @@ class TestNotifyBatching:
         assert len(sent) == 1
         assert "…等" in sent[0][1]
 
-    def test_a_whole_season_collapses_into_one_line(self, monkeypatch):
+    def test_a_whole_season_collapses_into_one_block(self, monkeypatch):
         """
-        西游记 1-25 集：正文要压成一行「西游记 第1-25集 下载完成」，
+        西游记 1-25 集：正文要压成一块四行（剧名 / 年份 / 集数 / 状态），
         而不是把 25 个片名全列出来（那正是"逐集推"换了个形式的刷屏）
         """
         _, sent = self.prepare(monkeypatch)
@@ -4019,10 +4020,77 @@ class TestNotifyBatching:
         time.sleep(0.25)
 
         assert len(sent) == 1
-        assert "西游记 第1-25集 下载完成" in sent[0][1]
-        assert "共 25 个任务已完成" in sent[0][1]
-        # 逐条片名不能同时出现：压成一行就是压成一行
+        assert "剧名：西游记" in sent[0][1]
+        assert "集数：第1-25集（共25集）" in sent[0][1]
+        assert "状态：已完成" in sent[0][1]
+        # 逐条片名不能同时出现：压成一块就是压成一块
         assert "三打白骨精" not in sent[0][1]
+
+    def test_the_block_is_exactly_four_lines(self, monkeypatch):
+        """一块就是四行，前后不留空行、也不拖一句总数 —— 正文形状要可预期"""
+        _, sent = self.prepare(monkeypatch)
+
+        for index in range(1, 26):
+            notify.notify_completed(self.fake_task("西游记", index))
+
+        time.sleep(0.25)
+
+        assert sent[0][1].splitlines() == [
+            "剧名：西游记",
+            "集数：第1-25集（共25集）",
+            "状态：已完成",
+        ]
+
+    def test_the_year_comes_from_the_identify_table(self, monkeypatch):
+        """年份只能是「名称识别」表里那一格 —— B站数据里根本没有首播年份"""
+        fake, sent = self.prepare(monkeypatch)
+
+        fake.store["naming_alias_list"] = [
+            {"match": "西游记", "field": "season_title", "mode": "contains",
+             "title": "西游记", "season": 1, "year": "1986", "tmdb": "13923"},
+        ]
+
+        for index in range(1, 4):
+            notify.notify_completed(self.fake_task("西游记", index))
+
+        time.sleep(0.25)
+
+        assert "年份：1986" in sent[0][1]
+
+    def test_an_unmatched_show_has_no_year_line_at_all(self, monkeypatch):
+        """
+        没配识别规则时「年份」整行不出现 —— 不能留「年份：」后面空着，
+        那比少一行更让人犯嘀咕；更不能拿上架时间冒充首播年份
+        """
+        _, sent = self.prepare(monkeypatch)
+
+        # 表里有这一条，但它是 TMDB 链接代填留下的、没填年份
+        notify.config.store["naming_alias_list"] = [{"match": "西游记", "year": ""}]
+
+        notify.notify_completed(self.fake_task("西游记", 1))
+
+        time.sleep(0.25)
+
+        assert "年份" not in sent[0][1]
+
+    def test_the_default_year_lookup_really_runs_its_own_body(self, monkeypatch, caplog):
+        """
+        默认的年份查询要真能走通那条真身，并且**不许吞异常**
+
+        🔴 与 _batch_still_running 是同一个病：这段外面裹着 `except Exception`，
+        单测把注入点一换就绕过了真身 —— 真身里写错个导入名（`..config` 之类），
+        表现是"年份永远查不到"，而全部用例照样绿。所以这里跑真身，只把配置换成
+        假的那一份，然后断言日志里没有任何 ERROR。
+        """
+        fake, _ = self.prepare(monkeypatch)
+
+        fake.store["naming_alias_list"] = [{"match": "西游记", "year": "1986"}]
+
+        with caplog.at_level(logging.ERROR):
+            year = notify._alias_year("西游记", "")
+
+        assert year == "1986"
+        assert [record for record in caplog.records if record.levelno >= logging.ERROR] == []
 
     def test_two_seasons_are_reported_on_separate_lines(self, monkeypatch):
         """不同合集不能混成一行 —— 否则「第1-25集」到底是谁的说不清"""
@@ -4034,8 +4102,12 @@ class TestNotifyBatching:
         time.sleep(0.25)
 
         assert len(sent) == 1
-        assert "西游记 第1集 下载完成" in sent[0][1]
-        assert "红楼梦 第2集 下载完成" in sent[0][1]
+        assert "剧名：西游记" in sent[0][1]
+        assert "剧名：红楼梦" in sent[0][1]
+        # 两块，各自带自己的集数 —— 混成一块的话「第1集」到底是谁的说不清
+        assert sent[0][1].count("剧名：") == 2
+        assert "集数：第1集（共1集）" in sent[0][1]
+        assert "集数：第2集（共1集）" in sent[0][1]
 
     def test_episode_numbers_are_compressed_into_ranges(self, monkeypatch):
         """断号要如实断开：1,2,3,7,9,10 → 1-3、7、9-10"""
@@ -4046,7 +4118,7 @@ class TestNotifyBatching:
 
         time.sleep(0.25)
 
-        assert "西游记 第1-3、7、9-10集 下载完成" in sent[0][1]
+        assert "集数：第1-3、7、9-10集（共6集）" in sent[0][1]
 
     def test_an_entry_without_a_season_falls_back_to_its_title(self, monkeypatch):
         """拿不到合集名/集号的记录退化成逐条列出，不能丢"""
@@ -4057,7 +4129,7 @@ class TestNotifyBatching:
 
         time.sleep(0.25)
 
-        assert "西游记 第1集 下载完成" in sent[0][1]
+        assert "剧名：西游记" in sent[0][1]
         assert "· 某个没有合集信息的任务" in sent[0][1]
 
     def test_the_notification_waits_while_the_queue_is_still_running(self, monkeypatch):
@@ -4094,7 +4166,7 @@ class TestNotifyBatching:
         time.sleep(0.25)
 
         assert len(sent) == 1
-        assert "西游记 第1-5集 下载完成" in sent[0][1]
+        assert "集数：第1-5集（共5集）" in sent[0][1]
 
     def test_flush_now_does_not_wait_for_the_queue(self, monkeypatch):
         """退出前补发：进程马上要没了，再等队列跑空等于一条都发不出去"""
@@ -4104,7 +4176,8 @@ class TestNotifyBatching:
         notify.flush_now()
 
         assert len(sent) == 1
-        assert "西游记 第1集 下载完成" in sent[0][1]
+        assert "剧名：西游记" in sent[0][1]
+        assert "状态：已完成" in sent[0][1]
 
     def test_the_default_probe_really_can_read_the_task_queue(self, monkeypatch, caplog):
         """
