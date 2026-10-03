@@ -155,13 +155,20 @@ CHANNEL_LABELS = {
     "telegram": "Telegram",
 }
 
-# 企业微信的必填凭据与它们的显示名。缺任何一项都发不出去，"启用"的判据就是这四项
+# 企业微信的必填凭据与它们的显示名。缺任何一项都发不出去。
+#
+# 🔴 「指定接收人」**不在这里**（2026-10-03 用户要求「企微指定接收人可以为空」）：
+# 留空是合法的，发送时按 @all 展开成"应用可见范围内的全体成员" —— 见 _send_wecom。
+# 之所以不是"发不出去"：企业微信要求 touser/toparty/totag 至少给一个，而 @all 正是
+# 官方给"所有人"的取值，空串则会被判参数错误
 WECOM_LABELS = (
     ("wecom_corp_id", "企业 ID"),
     ("wecom_agent_id", "应用 AgentId"),
     ("wecom_secret", "应用 Secret"),
-    ("wecom_touser", "指定接收人"),
 )
+
+# 接收人留空时的展开值。它出现在发给企业微信的 payload 里，也是面板说明里的说法
+WECOM_TOUSER_ALL = "@all"
 
 WECOM_REQUIRED = tuple(key for key, _ in WECOM_LABELS)
 
@@ -248,7 +255,12 @@ def validate_wecom_secret(value) -> str:
 
 
 def validate_wecom_touser(value) -> str:
-    """接收人。存成企业微信要的 | 分隔形式，用户敲逗号也认"""
+    """
+    接收人。存成企业微信要的 | 分隔形式，用户敲逗号也认
+
+    留空合法（2026-10-03 用户要求）—— 空串在这里原样返回，发送时由 _send_wecom
+    展开成 @all。所以"必填"那层判断不在这儿，在 WECOM_LABELS 里（已经没有它了）
+    """
     raw = _as_text(value, "指定接收人", MAX_TOUSER_LENGTH)
 
     if not raw:
@@ -512,7 +524,7 @@ def apply_settings(values: dict) -> dict:
 
 
 def missing_wecom_fields(settings: dict) -> list:
-    """还没填的企微凭据（显示名）。四项一起填的时候，一次报全比一次报一个强"""
+    """还没填的企微凭据（显示名）。三项一起填的时候，一次报全比一次报一个强"""
     return [
         label for key, label in WECOM_LABELS
         if not str(settings.get(key) or "").strip()
@@ -660,8 +672,10 @@ def _send_wecom(settings: dict, title: str, text: str) -> str:
     content = f"{title}\n{text}" if text else title
 
     payload = {
-        # touser 存的就是 | 分隔的成员账号（validate_wecom_touser 归一过）
-        "touser": settings["wecom_touser"],
+        # touser 存的就是 | 分隔的成员账号（validate_wecom_touser 归一过）。
+        # 留空 → @all：企业微信不接受空串（会判参数错误），而"没指定人"在用户心里
+        # 就是"发给全公司"，所以这里替他展开，别让一条好好的通知死在 82001 上
+        "touser": settings["wecom_touser"] or WECOM_TOUSER_ALL,
         "msgtype": "text",
         # agentid 必须是数字，字符串会被企业微信判成参数错误
         "agentid": int(settings["wecom_agent_id"]),

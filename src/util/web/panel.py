@@ -1416,7 +1416,7 @@ PANEL_HTML = r"""<!DOCTYPE html>
       <div class="field">
         <label>指定接收人</label>
         <input type="text" id="ntWecomUser" autocomplete="off" spellcheck="false" placeholder="zhangsan,lisi 或 @all">
-        <div class="hint">填<b>成员账号</b>（不是姓名），多个用英文逗号隔开；填 <code>@all</code> 发给全企业</div>
+        <div class="hint">填<b>成员账号</b>（不是姓名），多个用英文逗号隔开。<b>留空 = 发给全企业</b>（等价于 <code>@all</code>）</div>
       </div>
       <div class="field">
         <label>消息代理地址</label>
@@ -1440,57 +1440,24 @@ PANEL_HTML = r"""<!DOCTYPE html>
 
     <div class="nt-item collapsed" data-nt="callback">
       <div class="h">
-        <span class="nt-t"><b>企业微信回调</b><small>接收消息与事件，方向相反的那一半</small></span>
-        <span class="ntbadge" id="ntCbBadge">未启用</span>
+        <span class="nt-t"><b>企业微信回调</b><small>把下面这条地址填到企微后台</small></span>
+        <span class="ntbadge" id="ntCbBadge">未配置</span>
         <i class="fchev">▾</i>
       </div>
 
     <div style="padding:6px 20px 16px">
-      <div class="setrow">
-        <div>
-          <div class="setname">启用回调</div>
-          <div class="sethint">让企业微信把消息推给本面板；需要面板能从公网访问</div>
-        </div>
-        <div class="setctl"><input type="checkbox" id="ntCbOn"></div>
-      </div>
-      <div class="field" style="margin-top:14px">
-        <label>回调 Token</label>
-        <input type="text" id="ntCbToken" autocomplete="off" spellcheck="false" placeholder="未填写">
-        <div class="hint">企微后台「接收消息服务器配置」里你自己填的那个 Token，两边必须一字不差</div>
-      </div>
-      <div class="field">
-        <label>EncodingAESKey</label>
-        <div class="ntsecret">
-          <input type="password" id="ntCbAes" autocomplete="off" spellcheck="false"
-                 placeholder="43 位字母数字">
-          <button type="button" class="sm" id="ntCbEye">显示</button>
-        </div>
-        <div class="hint">同一处点「随机获取」得到的那串 43 位字符，原样复制过来</div>
-      </div>
-      <div class="field">
-        <label>对外访问地址</label>
-        <input type="text" id="ntCbBase" autocomplete="off" spellcheck="false" placeholder="https://bili23.892639.xyz:2662">
-        <div class="hint">面板在外网的那个地址。<b>必须是域名或公网 IP + 端口</b>，留空则用你当前打开面板的地址（从局域网 IP 打开面板时，那个地址填进企微后台是不通的）</div>
-      </div>
       <div class="field">
         <label>回调地址<span class="sub" style="margin-left:6px">填到企微后台的 URL</span></label>
         <div class="ntsecret">
-          <input type="text" id="ntCbUrl" readonly placeholder="填好上面几项后自动生成">
+          <input type="text" id="ntCbUrl" readonly placeholder="https://域名/api/wecom/callback">
           <button type="button" class="sm" id="ntCbCopy">复制</button>
         </div>
-        <div class="hint">企微后台 → 应用管理 → 自建 → 点进应用 → 接收消息 → 设置 API 接收，把这一整条填进 URL 并保存</div>
+        <div class="hint">企微后台 → 应用管理 → 自建 → 点进应用 → 接收消息 → 设置 API 接收，把这一整条填进 URL 并保存。
+          地址形如 <code>https://域名/api/wecom/callback</code>，其中域名就是你访问本面板用的那个
+          （从局域网 IP 打开面板时，那个地址填进企微后台是不通的）。<br>
+          接收消息还要求一对回调 Token 与 EncodingAESKey，必须与企微后台里填的一字不差 ——
+          这两项已从本页撤下，配置仍然保留着，需要改动时直接改配置文件。</div>
       </div>
-      <div class="cfgfoot">
-        <span class="msg" id="ntCbMsg"></span>
-      </div>
-    </div>
-    <div class="howto-in">
-      与上面那组是<b>两个方向</b>：上面是面板推给企业微信，这里是企业微信推给面板，所以要多一份 Token
-      与 EncodingAESKey。<br>
-      回调地址是<b>公开</b>的 —— 企微服务器不会带面板令牌来敲门，拦人的活由签名干：只有同时掌握
-      Token 与 EncodingAESKey 才算得出合法签名。两个值都按凭据对待，导出的配置里会被掩码。<br>
-      在企微后台点「保存」时它会立刻发一条验证请求，通了下面「回调记录」里就会出现一条
-      <b>URL 验证通过</b> —— 那就是端到端真的通了。
     </div>
     </div>
 
@@ -4320,12 +4287,7 @@ PANEL_HTML = r"""<!DOCTYPE html>
   }
 
   ntBindEye("ntWecomEye", "ntWecomSecret");
-  ntBindEye("ntCbEye", "ntCbAes");
   ntBindEye("ntTgEye", "ntTgToken");
-
-  // 对外地址一改，下面那条回调 URL 立刻跟着变 —— 用户复制的是"看得见的这条"，
-  // 不能让他改完还得先保存才看到正确结果
-  $("ntCbBase").addEventListener("input", ntRefreshCallbackUrl);
 
   $("ntCbCopy").onclick = function () {
     var url = $("ntCbUrl").value;
@@ -4380,10 +4342,8 @@ PANEL_HTML = r"""<!DOCTYPE html>
     // 所以来回一趟不会有改动
     $("ntWecomUser").value = c.wecom_touser || "";
     $("ntWecomBase").value = c.wecom_api_base || "";
-    $("ntCbOn").checked = !!c.wecom_callback_enabled;
-    ntFillSecret("ntCbToken", s.wecom_callback_token);
-    ntFillSecret("ntCbAes", s.wecom_aes_key);
-    $("ntCbBase").value = c.wecom_callback_base || "";
+    // 回调的开关 / Token / AESKey 与「对外访问地址」输入框都已撤下（只剩一条
+    // 只读的回调地址），这里没有要回填的东西 —— 地址由 ntCallbackUrl() 现算
     $("ntTgOn").checked = !!c.telegram_enabled;
     ntFillSecret("ntTgToken", s.telegram_token);
     $("ntTgChat").value = c.telegram_chat_id || "";
@@ -4393,7 +4353,8 @@ PANEL_HTML = r"""<!DOCTYPE html>
 
     // 标题栏上的状态胶囊：卡片收着也能一眼看出开没开
     ntBadge("ntWecomBadge", !!c.wecom_enabled);
-    ntBadge("ntCbBadge", !!c.wecom_callback_enabled);
+    // 回调没有开关可看了，胶囊改报"凭据齐没齐" —— 企微后台那条 URL 验不验得过就看它
+    ntBadge("ntCbBadge", !!d.callback_ready, "已配置", "未配置");
     ntBadge("ntTgBadge", !!c.telegram_enabled);
     ntBadge(
       "ntTrigBadge",
@@ -4403,16 +4364,18 @@ PANEL_HTML = r"""<!DOCTYPE html>
     );
 
     ntRefreshCallbackUrl();
-    ntRefreshCallbackNote(d);
 
     ntRenderHistory(d.history);
     ntRenderLogs("ntCallbackHistory", d.callback_history, "还没有收到过回调", "ntCbHistBadge");
   }
 
-  // 回调地址 = 对外访问地址 + 路径。没填对外地址就用当前 origin ——
-  // 从公网域名打开面板时这两者本来就一样
+  // 回调地址 = 面板配置里的对外地址 + 路径；没配就用当前 origin ——
+  // 从公网域名打开面板时这两者本来就一样。
+  //
+  // 2026-10-03 起「对外访问地址」输入框已撤（用户要求这一栏只留回调地址一行），
+  // 所以这里读的是配置里的存量值：页面改不了它，但也不会把它覆盖掉
   function ntCallbackUrl() {
-    var base = $("ntCbBase").value.trim().replace(/\/+$/, "");
+    var base = ((ntState.config || {}).wecom_callback_base || "").trim().replace(/\/+$/, "");
 
     if (!base) base = location.origin;
 
@@ -4421,37 +4384,6 @@ PANEL_HTML = r"""<!DOCTYPE html>
 
   function ntRefreshCallbackUrl() {
     $("ntCbUrl").value = ntCallbackUrl();
-  }
-
-  // 回调这一栏没有"发送测试"可点（是企微来敲我们），所以状态只能由
-  // 配置是否齐全 + 有没有收到过验证来判定
-  function ntRefreshCallbackNote(d) {
-    var msg = $("ntCbMsg");
-
-    msg.className = "msg";
-
-    if (!ntState.config.wecom_callback_enabled) {
-      msg.textContent = "";
-      return;
-    }
-
-    if (!d.callback_ready) {
-      msg.className = "msg err";
-      msg.textContent = "还差回调 Token 或 EncodingAESKey，补齐后保存才会生效";
-      return;
-    }
-
-    var seen = (d.callback_history || []).some(function (h) {
-      return h.ok && h.detail === "URL 验证通过";
-    });
-
-    if (seen) {
-      msg.className = "msg ok";
-      msg.textContent = "已经收到过合法的验证请求，链路是通的";
-      return;
-    }
-
-    msg.textContent = "凭据已齐全，去企微后台填上面那条 URL 并保存，它验证通过后这里会变色";
   }
 
   // 提交的字段名要与 notify.normalize_settings 对得上 —— 服务端按同一份
@@ -4464,10 +4396,14 @@ PANEL_HTML = r"""<!DOCTYPE html>
       wecom_secret: $("ntWecomSecret").value.trim(),
       wecom_touser: $("ntWecomUser").value.trim(),
       wecom_api_base: $("ntWecomBase").value.trim(),
-      wecom_callback_enabled: $("ntCbOn").checked,
-      wecom_callback_token: $("ntCbToken").value.trim(),
-      wecom_aes_key: $("ntCbAes").value.trim(),
-      wecom_callback_base: $("ntCbBase").value.trim(),
+      // 回调那四项的输入框已经撤了，但**必须原样带回去**：enabled / base 不在
+      // 服务端的"留空即不改"名单里（SECRET_KEYS 只管两个凭据），少提交它们，
+      // 后端会按 False / 空串写盘 —— 用户点一次保存就把回调关掉、对外地址清空。
+      // 两个凭据反过来要交空串，空串正是 SECRET_KEYS 里"这次不动"的约定
+      wecom_callback_enabled: !!(ntState.config || {}).wecom_callback_enabled,
+      wecom_callback_token: "",
+      wecom_aes_key: "",
+      wecom_callback_base: ((ntState.config || {}).wecom_callback_base || ""),
       telegram_enabled: $("ntTgOn").checked,
       telegram_token: $("ntTgToken").value.trim(),
       telegram_chat_id: $("ntTgChat").value.trim(),
@@ -4482,12 +4418,11 @@ PANEL_HTML = r"""<!DOCTYPE html>
 
     return get("api/panel/notify").then(function (d) {
       if (historyOnly) {
-        // 只刷记录，不动输入框里正在编辑的内容。回调那两栏跟着一起刷 ——
+        // 只刷记录，不动输入框里正在编辑的内容。回调记录跟着一起刷 ——
         // "有没有被企微验证过"是这里最值得盯的一格
         ntState.callbackPath = d.callback_path || ntState.callbackPath;
         ntRenderHistory(d.history);
         ntRenderLogs("ntCallbackHistory", d.callback_history, "还没有收到过回调", "ntCbHistBadge");
-        ntRefreshCallbackNote(d);
         return;
       }
 

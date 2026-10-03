@@ -3690,10 +3690,36 @@ class TestNotifyValidation:
             notify.normalize_settings(notify_values(wecom_enabled = True))
 
     def test_only_the_missing_wecom_field_is_named(self):
-        """四项只缺一个时要指名道姓 —— 把四项全列一遍等于没说"""
-        with pytest.raises(NotifyError, match = "指定接收人"):
+        """三项只缺一个时要指名道姓 —— 把三项全列一遍等于没说"""
+        with pytest.raises(NotifyError, match = "应用 Secret"):
             notify.normalize_settings(notify_values(
-                wecom_enabled = True, **wecom_kwargs(wecom_touser = "")))
+                wecom_enabled = True, **wecom_kwargs(wecom_secret = "")))
+
+    def test_the_receiver_may_be_left_empty(self):
+        """
+        「指定接收人」可以不填（2026-10-03 用户要求）
+
+        它原先和另外三项并列为必填，用户想启用通知就得先想好发给谁；
+        现在留空是合法配置，空值在发送时才展开成 @all（见 _send_wecom 那条用例）
+        """
+        clean = notify.normalize_settings(notify_values(
+            wecom_enabled = True, **wecom_kwargs(wecom_touser = "")))
+
+        assert clean["wecom_touser"] == ""
+        # 「启用」的判据跟着放宽：三项齐了就算不齐活，不该再被接收人卡住
+        assert notify.wecom_ready(clean) is True
+
+    def test_a_blank_receiver_counts_as_empty_not_as_an_error(self):
+        """
+        只填了空白也算"空" —— 别因为顺手敲了个空格就报"接收人不合法"
+
+        放宽的只是必填：真填了名字（而不是成员账号）照样拦，那条由
+        test_a_receiver_that_is_a_name_not_an_account_is_refused 守着
+        """
+        clean = notify.normalize_settings(notify_values(
+            wecom_enabled = True, **wecom_kwargs(wecom_touser = " ")))
+
+        assert clean["wecom_touser"] == ""
 
     def test_the_receiver_list_is_normalized_to_pipes(self):
         """企业微信 API 要的是 | 分隔，用户敲的是逗号"""
@@ -3807,7 +3833,7 @@ class TestNotifyChannels:
         assert notify.enabled_channels(notify_values(**wecom_kwargs())) == []
 
     def test_partial_credentials_are_not_a_channel(self):
-        """四项缺一项也算没配好 —— 真发出去只会换回一句参数错误"""
+        """三项缺一项也算没配好 —— 真发出去只会换回一句参数错误"""
         assert notify.enabled_channels(notify_values(
             wecom_enabled = True, **wecom_kwargs(wecom_secret = ""))) == []
 
@@ -3865,6 +3891,28 @@ class TestNotifySending:
         assert payload["msgtype"] == "text"
         assert "B站下载完成" in payload["text"]["content"]
         assert "西游记" in payload["text"]["content"]
+
+    def test_an_empty_receiver_is_sent_as_all(self, monkeypatch):
+        """
+        接收人留空 → payload 里是 @all
+
+        企业微信不接受空串的 touser（判参数错误），而"没指定人"在用户心里就是
+        "发给全公司"，所以由发送侧替他展开。这条必须单独钉：光在 normalize 那侧
+        测"允许留空"，真发出去仍是空串的话，通知会静默地发不出去
+        """
+        opener, _ = fake_wecom(monkeypatch)
+
+        settings = notify.normalize_settings(notify_values(
+            wecom_enabled = True, **wecom_kwargs(wecom_touser = "")))
+
+        ok, detail = notify.send("wecom", settings, "B站下载完成", "· 西游记")
+
+        assert ok is True
+        assert detail == "已送达"
+
+        payload = json.loads(opener.requests[1].data.decode("utf-8"))
+
+        assert payload["touser"] == "@all"
 
     def test_the_access_token_is_cached_between_sends(self, monkeypatch):
         """gettoken 有频率限制，一个合集几十集不能每集都去换一次 token"""
@@ -4675,6 +4723,40 @@ class TestPanelPage:
         # 正文是靠 CSS 一起藏掉的（没包额外的 div，行内部的 id 才不受影响）
         assert ".nt-item.collapsed > *:not(.h)" in page
         assert "NT_FOLD_KEY" in page
+
+    def test_the_callback_card_keeps_only_the_url(self, panel):
+        """
+        回调那栏只剩一条回调地址（2026-10-03 用户要求"这部分全部去掉"）
+
+        撤掉的是：启用开关、回调 Token、EncodingAESKey、对外访问地址、底下那段
+        说明。撤掉的控件**谁都不许再引用** —— 面板里留一句 $("ntCbOn")，元素没了
+        就是 null，整页 JS 会静默崩在那个函数里（按钮还在、点上去没反应）
+        """
+        page = self.page(panel)
+
+        for gone in ("ntCbOn", "ntCbToken", "ntCbAes", "ntCbBase", "ntCbEye", "ntCbMsg"):
+            assert gone not in page, gone
+
+        assert 'id="ntCbUrl"' in page
+        assert 'id="ntCbCopy"' in page
+        # 用户点名要写进说明的那个地址形状
+        assert "https://域名/api/wecom/callback" in page
+
+    def test_the_callback_fields_are_still_submitted_untouched(self, panel):
+        """
+        输入框撤了，配置不能跟着丢
+
+        enabled / base 不在服务端的"留空即不改"名单里（那张表只管两个凭据），
+        前端少提交它们，后端就按 False / 空串写 —— 用户点一次保存，回调被关掉、
+        对外地址被清空，而且完全看不出发生了什么。所以提交时要带原值回去
+        """
+        page = self.page(panel)
+
+        assert "wecom_callback_enabled: !!(ntState.config" in page
+        assert "wecom_callback_base: ((ntState.config" in page
+        # 两个凭据反过来：交空串才表示"这次不动"（SECRET_KEYS 的约定）
+        assert 'wecom_callback_token: ""' in page
+        assert 'wecom_aes_key: ""' in page
 
     def test_overview_shows_free_space_under_the_download_folder(self, panel):
         """概览那张「下载目录」卡：除了挂载点，还要说清还能再存多少"""
@@ -5729,14 +5811,20 @@ class TestWecomCallbackEndpoint:
         assert json.loads(raw)["config"]["wecom_callback_base"] == "https://bili23.892639.xyz:2662"
 
     def test_callback_page_controls_exist(self, panel):
-        """通知页要有这四个控件与那条待复制的地址，否则用户无处可填"""
+        """
+        通知页那条待复制的地址还在，否则用户无处可拿
+
+        以前这里还要求 ntCbOn / ntCbToken / ntCbAes / ntCbBase —— 2026-10-03
+        用户要求"这部分全部去掉，只留回调地址"，前四个已随输入框一起撤走，
+        回调整栏只剩「回调地址 + 复制」（另见 test_the_callback_card_keeps_only_the_url）
+        """
         status, raw = request(panel, "GET", "/", cookie = login(panel))
 
         assert status == 200
 
         page = raw.decode("utf-8")
 
-        for control in ("ntCbOn", "ntCbToken", "ntCbAes", "ntCbBase", "ntCbUrl", "ntCbCopy", "ntCallbackHistory"):
+        for control in ("ntCbUrl", "ntCbCopy", "ntCallbackHistory"):
             assert f'id="{control}"' in page
 
         # 路径由服务端下发，前端不该自己拼死一份
