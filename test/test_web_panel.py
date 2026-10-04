@@ -3168,11 +3168,14 @@ def make_backup_entry(source = None, destination = "/115open/云下载/哔哩哔
 
 class TestSyncApi:
     """
-    云端备份接口。
+    云端同步接口。
 
-    🔴 它**不再立刻传**：POST 只是登记一笔排期，真正动手要等下载队列彻底安静、
-    再等设置里那个延迟（见 util/clouddrive/schedule.py）。所以这一组分成两半 ——
-    接口测「排期记下了没有、能不能撤」，背后那个真身函数测「对 CD2 说清楚了没有」。
+    🔴 两条路是分开的，这一组也要分开测：
+
+      · **手动**：POST 就是**当场执行** —— 不再登记什么排期。用户 2026-10-04
+        明确要求「点这个按钮要立即执行，那个（延迟）是自动方案」。
+      · **自动**：队列跑完 N 分钟自己传，逻辑在 util/clouddrive/schedule.py，
+        那一组在 test_cloud_sync_schedule.py 里测。
 
     真身那一半把 build_cd2_client 换掉：否则一次测试就真的会去连 CD2 的 19798，
     还会顺手触发一次真实备份。
@@ -3221,13 +3224,13 @@ class TestSyncApi:
 
         return client
 
-    # ---- 接口这一半：只排期，不动手 ----
+    # ---- 接口这一半：点一下就是当场执行 ----
 
     def test_requires_login(self, panel):
         assert request(panel, "POST", PANEL_SYNC_PATH, body = b"{}")[0] == 401
 
-    def test_the_button_only_schedules(self, panel, monkeypatch):
-        """点一下不许当场开传：下载还在跑时扫到的目录里全是半成品"""
+    def test_the_button_triggers_cd2_right_away(self, panel, monkeypatch):
+        """点一下就得让 CD2 重扫 —— 用户要的就是"立即"，别再登记什么排期"""
         client = self.fake_client(monkeypatch, backup = make_backup_entry())
 
         status, raw = request(panel, "POST", PANEL_SYNC_PATH, body = b"{}", token = TOKEN)
@@ -3237,24 +3240,57 @@ class TestSyncApi:
         data = json.loads(raw)
 
         assert data["ok"] is True
-        assert data["pending"]["armed"] is True
-        assert client.restarted == [], "接口里不允许直接触发 CD2"
+        assert client.restarted == [web_server.SYNC_SOURCE]
 
-    def test_the_message_says_what_it_is_waiting_for(self, panel, monkeypatch):
-        """只回一句「已排期」等于没说 —— 用户要知道在等什么、等多久"""
+    def test_the_message_says_it_is_done(self, panel, monkeypatch):
+        """回一句「已排期」会让人白等 —— 文案得说清这次是真传了"""
         self.fake_client(monkeypatch, backup = make_backup_entry())
 
         _, raw = request(panel, "POST", PANEL_SYNC_PATH, body = b"{}", token = TOKEN)
 
         message = json.loads(raw)["message"]
 
-        assert "排期" in message
-        assert "分钟" in message or "完成" in message
+        assert "扫描" in message or "同步" in message
+        assert "排期" not in message
+        assert "分钟" not in message
 
-    def test_the_cancel_endpoint_calls_off_the_wait(self, panel, monkeypatch):
+    def test_a_failed_manual_run_is_kept_for_the_page(self, panel, monkeypatch):
+        """失败也要留痕：不然用户点完看到一句报错、刷新一下就没痕迹了"""
+        self.fake_client(monkeypatch, backup = None)
+
+        status, _ = request(panel, "POST", PANEL_SYNC_PATH, body = b"{}", token = TOKEN)
+
+        assert status == 404
+
+        last = schedule.status()["last_result"]
+
+        assert last["ok"] is False
+        assert web_server.SYNC_SOURCE in last["message"]
+
+    def test_the_run_result_reaches_the_page(self, panel, monkeypatch):
+        """成功的结果同样要落到 last_result，页面上那句「上次同步」才有东西可显示"""
         self.fake_client(monkeypatch, backup = make_backup_entry())
 
         request(panel, "POST", PANEL_SYNC_PATH, body = b"{}", token = TOKEN)
+
+        last = schedule.status()["last_result"]
+
+        assert last["ok"] is True
+        assert web_server.SYNC_SOURCE in last["message"]
+
+    def test_the_cancel_endpoint_calls_off_the_auto_round(self, panel, monkeypatch):
+        """取消撤的是自动方案那一轮 —— 手动那颗是立即执行的，没有可撤的东西"""
+        self.fake_client(monkeypatch, backup = make_backup_entry())
+
+        # 造一轮"队列忙过"的自动计时，再撤掉它。用 monkeypatch 而不用 configure()：
+        # 后者会永久改掉模块级的注入点，漏到后面的用例里去
+        monkeypatch.setattr(schedule, "_is_busy", lambda: True)
+        monkeypatch.setattr(schedule, "_get_delay", lambda: 3600)
+        monkeypatch.setattr(schedule, "_is_enabled", lambda: True)
+
+        schedule.pump()
+
+        assert schedule.status()["waiting_queue"] is True
 
         status, raw = request(panel, "POST", PANEL_SYNC_CANCEL_PATH, body = b"{}", token = TOKEN)
 
@@ -3262,21 +3298,20 @@ class TestSyncApi:
 
         data = json.loads(raw)
 
-        assert data["pending"]["armed"] is False
-        assert data["pending"]["waiting_queue"] is False
         assert "取消" in data["message"]
+        assert data["pending"]["pending"] is False
 
     def test_cancel_requires_login(self, panel):
         assert request(panel, "POST", PANEL_SYNC_CANCEL_PATH, body = b"{}")[0] == 401
 
     def test_cancel_says_so_when_there_was_nothing_to_cancel(self, panel):
-        """没排期就得如实说没有，别报「已取消」让用户以为撤掉了什么"""
+        """没在等就得如实说没有，别报「已取消」让用户以为撤掉了什么"""
         status, raw = request(panel, "POST", PANEL_SYNC_CANCEL_PATH, body = b"{}", token = TOKEN)
 
         assert status == 200
         assert "没有等待中" in json.loads(raw)["message"]
 
-    # ---- 真身这一半：到点之后对 CD2 说了什么 ----
+    # ---- 真身这一半：对 CD2 说了什么 ----
 
     def test_the_run_restarts_that_backup(self, panel, monkeypatch):
         client = self.fake_client(monkeypatch, backup = make_backup_entry())
@@ -3331,11 +3366,31 @@ class TestSyncApi:
 
     # ---- 设置项与页面 ----
 
-    def test_the_settings_page_offers_both_switches(self):
+    def test_the_settings_page_offers_all_three_switches(self):
         keys = {field["key"] for field in web_server.SETTINGS_FIELDS}
 
+        assert "cloud_sync_auto" in keys
         assert "cloud_sync_confirm" in keys
         assert "cloud_sync_delay_minutes" in keys
+
+    def test_the_delay_setting_is_labelled_as_the_automatic_one(self):
+        """🔴 延迟归自动方案 —— 文案要是还写着「点备份后先等」，就又把两条路搅一起了"""
+        fields = {field["key"]: field for field in web_server.SETTINGS_FIELDS}
+
+        assert "自动" in fields["cloud_sync_delay_minutes"]["label"]
+        assert "手" in fields["cloud_sync_delay_minutes"]["hint"]
+
+    def test_sync_config_reports_whether_the_queue_is_busy(self, panel):
+        """手动同步前的弹窗要提醒"会把半成品一起传" —— 判据得由服务端现探"""
+        status, raw = request(panel, "GET", PANEL_SYNC_CONFIG_PATH, token = TOKEN)
+
+        assert status == 200
+
+        data = json.loads(raw)
+
+        assert data["busy"] is False
+        assert isinstance(data["pending"], dict)
+        assert "auto" in data["pending"]
 
     def test_the_page_reads_the_switch_before_asking(self, panel):
         """
@@ -3349,19 +3404,34 @@ class TestSyncApi:
         assert "d.confirm" in page
         assert "api/panel/sync_config" in page
 
-    def test_the_page_ships_the_queue_state_and_the_cancel(self, panel):
+    def test_the_confirm_question_warns_about_a_busy_queue(self, panel):
+        """队列还在跑时说清了会传半成品 —— 传是用户的权利，但得让他知情"""
+        page = self.page(panel)
+
+        assert "d.busy" in page
+        assert "半成品" in page
+
+    def test_the_page_ships_the_auto_state_and_the_cancel(self, panel):
         page = self.page(panel)
 
         assert 'id="syncPending"' in page
         assert 'id="syncCancelBtn"' in page
         assert "api/panel/sync_cancel" in page
 
-    def test_the_old_instant_backup_copy_is_gone(self, panel):
-        """旧文案会让用户以为点了就立刻传，改完必须一起清掉"""
+    def test_the_old_scheduling_copy_is_gone(self, panel):
+        """旧文案会让用户以为点了要等 —— 改完必须一起清掉"""
         page = self.page(panel)
 
-        assert "立即把下载目录同步到" not in page
-        assert "立即备份" not in page
+        assert "排期备份" not in page
+        assert "☁ 排队中" not in page
+        assert "点「排期备份」后" not in page
+
+    def test_the_overview_button_says_it_syncs_at_once(self, panel):
+        """概览右上角那颗的悬浮说明要写明"立即"，别再写"等下载任务全部完成后" """
+        page = self.page(panel)
+
+        assert "云端同步：立即" in page
+        assert "云端备份：等下载任务全部完成后" not in page
 
 class TestSyncConfig:
     """

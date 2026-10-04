@@ -92,7 +92,8 @@ PANEL_SYNC_PATH = "/api/panel/sync"
 PANEL_SYNC_CONFIG_PATH = "/api/panel/sync_config"
 PANEL_SYNC_CONFIG_SAVE_PATH = "/api/panel/sync_config/save"
 
-# 撤销已排期的那次同步。点错了得有反悔的路，否则只能等它自己跑掉
+# 撤销自动方案那一轮。点错了得有反悔的路，否则只能等它自己跑掉
+# （手动那颗按钮是立即执行的，点完没有可撤的东西）
 PANEL_SYNC_CANCEL_PATH = "/api/panel/sync_cancel"
 
 # MCP 访问令牌的重新生成。旧令牌随即作废（MCP 每个请求都现查配置，不用重启）
@@ -604,24 +605,32 @@ SETTINGS_FIELDS = (
         "hint": "批量解析与自动解析里，每条链接解析完就立刻建下载任务，不等你勾选。关掉时解析结果只做预览，勾好再手动开始下载",
     },
 
-    # 云端同步。这两项管的是"点下按钮之后多久才真的开始传"，不是 CD2 那边怎么连
-    # （那套在「云端同步」页上）。放到设置页是因为它属于面板自身的行为偏好
+    # 云端同步。手动那颗按钮（概览右上角 / 云端同步页）点了就让 CD2 重扫，不等任何
+    # 东西；下面三项管的**全是自动方案** —— 队列跑完之后自己传那一套。
+    # 放到设置页是因为它属于面板自身的行为偏好，与 CD2 怎么连（在「云端同步」页）无关
+    {
+        "key": "cloud_sync_auto",
+        "group": "云端同步",
+        "label": "下载完成后自动同步",
+        "type": "bool",
+        "hint": "下载队列里的任务全部跑完后，再等下面那个延迟，面板会自动让 CD2 重扫一遍。关掉之后只能手动点按钮同步",
+    },
+    {
+        "key": "cloud_sync_delay_minutes",
+        "group": "云端同步",
+        "label": "自动同步延迟",
+        "type": "int",
+        "min": 0,
+        "max": 120,
+        "unit": "分钟",
+        "hint": "只作用于自动方案：队列跑完之后等这么久才让 CD2 重扫 —— 那几分钟留给 FFmpeg 合并与文件重命名落定，免得把半成品传上去。填 0 表示队列一空就传。手动点按钮不受它影响，点了就传",
+    },
     {
         "key": "cloud_sync_confirm",
         "group": "云端同步",
         "label": "同步前弹窗确认",
         "type": "bool",
-        "hint": "关上以后，点云端备份直接排期、不再弹窗问一句。开着适合手滑党：概览页那颗按钮就在标题旁边，误点一下就是几十 G 的上传",
-    },
-    {
-        "key": "cloud_sync_delay_minutes",
-        "group": "云端同步",
-        "label": "下载完成后延迟",
-        "type": "int",
-        "min": 0,
-        "max": 120,
-        "unit": "分钟",
-        "hint": "点备份后先等下载任务全部跑完，再等这么久才让 CD2 重扫 —— 那几分钟留给 FFmpeg 合并与文件重命名落定，免得把半成品传上去。填 0 表示队列一空就传",
+        "hint": "只作用于手动那颗按钮：开着时点一下先问一句（队列还在跑还会额外提醒会传半成品），关上就直接传。概览页那颗按钮就在标题旁边，手滑党建议开着",
     },
 
     # MCP 服务器。令牌与运行状态不走这套字段：令牌有独立的重新生成接口，
@@ -1682,8 +1691,9 @@ def run_cloud_sync_now() -> str:
     """真正让 CD2 重扫那条备份的源目录，返回一句结果描述
 
     扫描与上传由 CD2 自己在后台跑，这里立即返回 —— 不用 docker exec，所以也不会
-    把调用线程挂在备份上。排期器到点后调它，将来若再加"立刻传"的入口也调它：
-    两条路走同一份实现，免得出现"手动能传、排期传不了"这种只在一边冒的毛病。
+    把调用线程挂在备份上。**两条路都调它**：手动那颗按钮（api_sync）直接调、
+    自动方案到点后由排期器调 —— 走同一份实现，免得出现"手动能传、自动传不了"
+    这种只在一边冒的毛病。
     """
     settings = sync_settings()
     source = settings["source"]
@@ -1723,39 +1733,40 @@ def run_cloud_sync_now() -> str:
 
 def api_sync(handler, payload: dict) -> dict:
     """
-    排期一次云端备份：等下载队列彻底安静、再等设置里那个延迟，才真的让 CD2 重扫
+    手动同步：**立即**让 CD2 重扫，不等队列、不等延迟
 
-    不立即执行是刻意的 —— 下载还在跑时扫到的目录里全是半成品（FFmpeg 没合并完、
-    文件还没按命名规则改名），传上去等收尾完还得再传一遍，白跑一趟带宽。延迟与
-    弹窗开关都在设置页的「云端同步」组里。
+    用户 2026-10-04 明确要求「点这个按钮要立即执行，那个（延迟）是自动方案」——
+    所以第一版那套"点一下只登记排期"的做法在这里被推翻了，延迟归自动方案
+    （util/clouddrive/schedule.py），手动这条路不看它。
+
+    队列还在跑也照传：前端弹窗会提醒一句"会连半成品一起传"，把决定权留给点按钮的
+    人 —— 他可能就是想先把已经下完的那批传上去。
     """
-    delay_minutes = int(config.get(config.cloud_sync_delay_minutes) or 0)
-    state = cloud_sync_schedule.schedule(delay_minutes * 60)
+    try:
+        message = run_cloud_sync_now()
 
-    if state["waiting_queue"]:
-        message = f"已排期：下载任务全部完成后再等 {delay_minutes} 分钟自动同步"
+    except PanelError as e:
+        # 失败也留痕：页面上的「上次同步」要能看见，不然用户点完只看到一句报错就走了
+        cloud_sync_schedule.remember(False, str(e) or "云端同步失败")
+        raise
 
-    elif delay_minutes:
-        message = f"已排期：{delay_minutes} 分钟后自动同步"
+    cloud_sync_schedule.remember(True, message)
 
-    else:
-        message = "下载队列已空，随即自动同步"
-
-    return {"ok": True, "message": message, "pending": state}
+    return {"ok": True, "message": message, "pending": cloud_sync_schedule.status()}
 
 
 def api_sync_cancel(handler, payload: dict) -> dict:
     """
-    撤销排期
+    撤销**本轮**的自动同步（手动那颗按钮是立即执行的，点完没有可撤的东西）
 
-    没排期时如实说「没有」，不要一律回「已取消」—— 用户点了下没排期的按钮却看到
-    "已取消"，会以为撤掉了什么，回头发现同步照跑更迷惑。
+    没在计时时如实说「没有」，不要一律回「已取消」—— 用户点了下却看到"已取消"，
+    会以为撤掉了什么，回头发现同步照跑更迷惑。
     """
     cancelled = cloud_sync_schedule.cancel()
 
     return {
         "ok": True,
-        "message": "已取消等待中的同步" if cancelled else "当前没有等待中的同步",
+        "message": "已取消这一轮的自动同步" if cancelled else "当前没有等待中的自动同步",
         "pending": cloud_sync_schedule.status(),
     }
 
@@ -1765,10 +1776,13 @@ CD2_HOST_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*")
 
 def api_sync_config_get(handler, payload: dict) -> dict:
     """
-    CD2 配置 + 那条备份的当前状态 + 待执行的那次同步。密码只回「设了没」，不回内容
+    CD2 配置 + 那条备份的当前状态 + 自动方案的进度。密码只回「设了没」，不回内容
 
-    顺带把「要不要弹窗」「延迟多久」「有没有在等」一并下发：前端点备份时要用它们
-    决定弹不弹窗、文案怎么写，为这点事再跑一趟设置接口不值当。
+    顺带把「要不要弹窗」「延迟多久」「队列忙不忙」「自动方案在不在等」一并下发：
+    前端点按钮时要用它们决定弹不弹窗、文案怎么写，为这点事再跑一趟设置接口不值当。
+
+    `busy` 是现探的（不是心跳那一拍的记忆值）—— 弹窗上那句"当前还有任务在跑"
+    必须说准，差 15 秒就可能把"快传完了"说成"还有一大堆"
     """
     settings = sync_settings()
 
@@ -1785,6 +1799,7 @@ def api_sync_config_get(handler, payload: dict) -> dict:
         "status": None,
         "confirm": bool(config.get(config.cloud_sync_confirm)),
         "delay_minutes": int(config.get(config.cloud_sync_delay_minutes) or 0),
+        "busy": cloud_sync_schedule.queue_busy(),
         "pending": cloud_sync_schedule.status(),
     }
 
@@ -2081,12 +2096,16 @@ PANEL_GET_ROUTES = {
 # 不需要登录就能访问的接口
 PANEL_PUBLIC_PATHS = (PANEL_LOGIN_PATH,)
 
-# 把云端同步的排期器接上：它自己去问下载队列忙不忙，到点了再回来调 run_cloud_sync_now。
-# 放在这里是因为两边此刻都已定义完 —— 排期器本身不 import 这个模块（见 schedule.py
-# 的模块注释），依赖是靠这次注入接上的，测试里才好整条换掉。
+# 把云端同步的自动方案接上：它自己去问下载队列忙不忙，队列跑完满延迟后回来调
+# run_cloud_sync_now。延迟与开关是每拍现读的（注入的是读法而不是值），所以在设置页
+# 改完立刻生效，不用重新 configure。放在这里是因为两边此刻都已定义完 —— 排期器本身
+# 不 import 这个模块（见 schedule.py 的模块注释），依赖是靠这次注入接上的，
+# 测试里才好整条换掉。
 cloud_sync_schedule.configure(
     runner = run_cloud_sync_now,
     is_busy = notify.downloads_still_running,
+    get_delay = lambda: int(config.get(config.cloud_sync_delay_minutes) or 0) * 60,
+    is_enabled = lambda: bool(config.get(config.cloud_sync_auto)),
 )
 
 class WebPanelHandler(BaseHTTPRequestHandler):

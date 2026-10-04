@@ -968,7 +968,7 @@ PANEL_HTML = r"""<!DOCTYPE html>
           <polyline points="22.5 4 22.5 9.5 17 9.5"/>
         </svg>
       </button>
-      <button class="ring-btn" id="ovBackupBtn" title="云端备份：等下载任务全部完成后自动同步到 115 网盘" aria-label="云端备份">
+      <button class="ring-btn" id="ovBackupBtn" title="云端同步：立即让 CloudDrive2 重扫下载目录并同步到 115 网盘" aria-label="云端同步">
         <svg viewBox="0 0 24 24" fill="none" stroke="url(#icoGrad)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
           <path d="M12 13v8"/>
           <path d="M4 14.9A7 7 0 1 1 15.71 8h1.79a4.5 4.5 0 0 1 2.5 8.24"/>
@@ -1292,8 +1292,8 @@ PANEL_HTML = r"""<!DOCTYPE html>
   <header class="phead">
     <h1>云端同步</h1>
     <div class="pacts">
-      <button class="sm" id="syncCancelBtn" hidden>取消等待</button>
-      <button class="primary" id="syncBtn">☁ 排期备份</button>
+      <button class="sm" id="syncCancelBtn" hidden>取消自动同步</button>
+      <button class="primary" id="syncBtn">☁ 立即同步</button>
     </div>
   </header>
 
@@ -1332,12 +1332,16 @@ PANEL_HTML = r"""<!DOCTYPE html>
     <div class="howto-in" id="syncPending"></div>
 
     <div class="howto-in">
-      <b style="color:var(--text)">备份原理：</b>点「排期备份」后面板不立刻动手 —— 先等下载队列里
-      所有任务都跑完，再等设置里配的延迟（默认 5 分钟，在设置页「云端同步」组里改），
-      那几分钟正好留给 FFmpeg 合并与文件重命名落定，免得把半成品传上去。到点后用上面的账号密码
-      登录 <code>CloudDrive2</code>（GetToken 换 JWT），按源目录找到它自己那条备份任务，让它
-      重扫一遍（BackupRestartWalkingThrough）。增量对比、冲突策略、失败重试与上传进度都归
-      CD2 的备份引擎管 —— 不再是在容器里 <code>cp</code> 一份、让每个文件都变成一条传输任务。
+      <b style="color:var(--text)">两条路：</b>
+      <b>手动</b> —— 点右上角那颗圆环按钮或本页的「立即同步」，<b>当场</b>就让 CD2 重扫，
+      不等下载、不等延迟。队列里还有任务时也会照传（弹窗会提醒一句：那会把半成品一起传上去）。<br>
+      <b>自动</b> —— 下载队列里的任务全部跑完之后，再等设置里配的「自动同步延迟」（默认 5 分钟，
+      在设置页「云端同步」组里改，可关），面板自己让 CD2 重扫。那几分钟正好留给
+      FFmpeg 合并与文件重命名落定，免得把半成品传上去。<br>
+      <b>备份原理：</b>到点后用上面的账号密码登录 <code>CloudDrive2</code>（GetToken 换 JWT），
+      按源目录找到它自己那条备份任务，让它重扫一遍（BackupRestartWalkingThrough）。增量对比、
+      冲突策略、失败重试与上传进度都归 CD2 的备份引擎管 —— 不再是在容器里 <code>cp</code> 一份、
+      让每个文件都变成一条传输任务。
     </div>
   </div>
 </section>
@@ -3984,7 +3988,7 @@ PANEL_HTML = r"""<!DOCTYPE html>
   $("logLevel").onchange = loadLogs;
   $("logLines").onchange = loadLogs;
 
-  // ---- 云端同步：CD2 配置 + 排期备份 ----
+  // ---- 云端同步：CD2 配置 + 手动按钮 + 自动方案进度 ----
   //
   // 备份不再走 docker exec 的逐文件复制，而是直连 CD2 的 gRPC 接口（见后端
   // util/clouddrive）：登录 → 按源目录找到它那条备份 → 让它重扫一遍。
@@ -4087,33 +4091,31 @@ PANEL_HTML = r"""<!DOCTYPE html>
 
   // 云端同步页那颗和概览页右上角那颗是同一个动作，实现收在这里共用。
   //
-  // 两颗都不再立刻让 CD2 重扫：先记一笔排期，等下载队列彻底安静、再等设置里那个
-  // 延迟（默认 5 分钟）才动手 —— 边下边传会把 FFmpeg 的中间产物和还没改名的文件
-  // 一起传上去。要不要弹窗问一句由设置里的「同步前弹窗确认」决定（默认关）。
+  // 🔴 点一下**立即执行**：不等下载队列、不等设置里那个延迟。延迟属于"自动方案"
+  // （下载全部跑完 N 分钟后自己传，见 util/clouddrive/schedule.py），用户
+  // 2026-10-04 明确要求手动这条路别被它拖住。
   //
-  // 弹窗开关在服务端，所以点击时得先问一次配置；顺带把延迟分钟数取回来，好把
-  // "还要等多久"写进提示 —— 否则用户点完只看到一句"已排期"，不知道在等什么。
+  // 弹窗开关在服务端，所以点击时得先问一次配置。顺带把"队列忙不忙"取回来 ——
+  // 忙的时候要提醒他这一传就会把半成品一起传上去，那是他自己的决定，但不能不知情。
   function runCloudBackup(btn) {
     var label = btn ? btn.textContent : "";
 
     if (btn) btn.disabled = true;
 
     get("api/panel/sync_config").then(function (d) {
-      var minutes = d.delay_minutes || 0;
-
-      var question = minutes
-        ? "把下载目录同步到 115 网盘？会等当前下载任务全部完成，再等 " + minutes + " 分钟才开传。过程在后台执行，可随时回来看进度。"
-        : "把下载目录同步到 115 网盘？会等当前下载任务全部完成后开传。过程在后台执行，可随时回来看进度。";
+      var question = d.busy
+        ? "立即把下载目录同步到 115 网盘？⚠️ 当前还有下载任务在跑，还没合并 / 改名的文件会被一起传上去。"
+        : "立即把下载目录同步到 115 网盘？过程在后台执行，可随时回来看进度。";
 
       if (d.confirm && !window.confirm(question)) return null;
 
-      if (btn && btn.id === "syncBtn") btn.textContent = "☁ 排队中…";
+      if (btn && btn.id === "syncBtn") btn.textContent = "☁ 同步中…";
 
       return post("api/panel/sync", {});
     }).then(function (d) {
       if (!d) return;
 
-      toast(d.message || "已排期云端备份");
+      toast(d.message || "已触发云端同步");
       renderSyncPending(d.pending);
     }).catch(function (e) {
       if (e.message !== "unauthorized") toast(e.message);
@@ -4125,7 +4127,7 @@ PANEL_HTML = r"""<!DOCTYPE html>
     });
   }
 
-  // 排期状态那块。倒计时在前端走：服务端不为它开高频接口 —— 否则每秒都要越过
+  // 自动方案那块。倒计时在前端走：服务端不为它开高频接口 —— 否则每秒都要越过
   // 一次登录鉴权，去问一个只存在于内存里的数
   var syncCountdown = null;
 
@@ -4140,16 +4142,16 @@ PANEL_HTML = r"""<!DOCTYPE html>
     return minutes + " 分" + (rest ? " " + rest + " 秒" : "");
   }
 
-  // 排期那次执行的结果。它是后台跑的，失败时用户不在场 —— 不把结果带回来，
-  // 页面上就只剩"点过、等过、什么都没发生"
+  // 上一次同步的结果。自动那次是后台跑的，失败时用户不在场；手动那次虽然当场
+  // 报错，但刷新一下就没了 —— 两种都落在这里，页面上才是"同一次同步一个说法"
   function syncResultText(last) {
     if (!last) return "";
 
     var when = last.at ? new Date(last.at * 1000).toLocaleTimeString() : "";
 
-    if (last.ok) return "　上次同步（" + esc(when) + "）：" + esc(last.message || "已触发");
+    if (last.ok) return "<br>　上次同步（" + esc(when) + "）：" + esc(last.message || "已触发");
 
-    return "　上次同步（" + esc(when) + "）失败：" + esc(last.message || "原因没记下来");
+    return "<br>　上次同步（" + esc(when) + "）失败：" + esc(last.message || "原因没记下来");
   }
 
   function renderSyncPending(pending) {
@@ -4165,27 +4167,31 @@ PANEL_HTML = r"""<!DOCTYPE html>
 
     pending = pending || {};
 
-    // 取消按钮只在真有排期时出现 —— 一直摆着会让人以为"排队中"是个常态
-    if (cancel) cancel.hidden = !pending.armed;
+    var minutes = Math.round(pending.delay_minutes || 0);
+    var armed = !!pending.pending || !!pending.waiting_queue;
 
-    if (!pending.armed) {
-      box.innerHTML = "<b style='color:var(--text)'>排期：</b>没有等待中的同步。"
-        + "点上面那颗按钮后，面板会等下载任务全部跑完、再等 " + (pending.delay_minutes || 0)
-        + " 分钟才让 CD2 重扫（延迟在设置页「云端同步」组里改）。"
-        + syncResultText(pending.last_result);
+    // 取消按钮只在自动方案真在等的时候出现 —— 一直摆着会让人以为"等同步"是个常态
+    if (cancel) cancel.hidden = !armed;
+
+    var head = "<b style='color:var(--text)'>自动方案：</b>" + (pending.auto
+      ? "开着 —— 下载队列跑完后等 " + minutes + " 分钟，面板自己让 CD2 重扫（延迟在设置页「云端同步」组里改）。"
+      : "关着 —— 只有点按钮才会同步（在设置页「云端同步」组里开）。");
+
+    if (!armed) {
+      box.innerHTML = head + syncResultText(pending.last_result);
       return;
     }
 
     if (pending.waiting_queue) {
-      box.innerHTML = "<b style='color:var(--text)'>排期：</b>已排队 —— 正在等下载任务全部完成，"
-        + "完成后再等 " + Math.round(pending.delay_minutes || 0) + " 分钟开始同步。"
-        + "再点一次按钮可重新计时。" + syncResultText(pending.last_result);
+      box.innerHTML = head + "<br><b style='color:var(--text)'>本轮：</b>下载任务还在跑，"
+        + "全部跑完后再等 " + minutes + " 分钟自动同步。"
+        + syncResultText(pending.last_result);
       return;
     }
 
     var paint = function (left) {
-      box.innerHTML = "<b style='color:var(--text)'>排期：</b>已排队 —— 下载队列已空，"
-        + fmtRemaining(left) + "后开始同步。再点一次按钮可重新计时。"
+      box.innerHTML = head + "<br><b style='color:var(--text)'>本轮：</b>下载已结束，"
+        + fmtRemaining(left) + "后自动同步。"
         + syncResultText(pending.last_result);
     };
 
@@ -4198,7 +4204,7 @@ PANEL_HTML = r"""<!DOCTYPE html>
       if (left <= 0) {
         clearInterval(syncCountdown);
         syncCountdown = null;
-        box.innerHTML = "<b style='color:var(--text)'>排期：</b>已到时间，正在让 CD2 重扫…";
+        box.innerHTML = head + "<br><b style='color:var(--text)'>本轮：</b>已到时间，正在让 CD2 重扫…";
         return;
       }
 
