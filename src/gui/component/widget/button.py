@@ -9,7 +9,13 @@ from qfluentwidgets import ToolButton as _ToolButton, TransparentToolButton as _
 
 class IndeterminateProgressBase:
     def _init_spinner(self):
-        self.spinner = IndeterminateProgressRing(self)
+        # qfluentwidgets 的 IndeterminateProgressRing 默认 start = True：构造时就启动
+        # aniGroup（setLoopCount(-1)，无限循环），而 hide() 只隐藏控件、不会停掉
+        # QPropertyAnimation。于是 Qt 的统一动画时钟（默认 16ms / 60fps）一直转着，
+        # 主线程每秒被唤醒约 60 次，空闲时也稳定吃掉约 1% 单核（实测：一个隐藏的环
+        # 在 FluentWindow 里值 1.05 pp，stop() 后立刻回到 0.005%）。
+        # 改成 start = False，只在真正要显示的时候才转；与 progress_tip.py 的写法一致。
+        self.spinner = IndeterminateProgressRing(self, start = False)
         self.spinner.setStrokeWidth(3)
         self.spinner.setFixedSize(20, 20)
         self.spinner.setCustomBarColor(Qt.GlobalColor.white, Qt.GlobalColor.black)
@@ -25,11 +31,13 @@ class IndeterminateProgressBase:
 
         if state:
             self.spinner.show()
+            self.spinner.start()
 
             self.setText("")
 
         else:
             self.spinner.hide()
+            self.spinner.stop()
 
             self.setText(self._text)
 
