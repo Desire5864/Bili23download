@@ -51,11 +51,25 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # 备用副本，推 Docker Hub。与 ghcr 同一次构建、同一组 tag，产物一致。
+      # Docker Hub 的 Docker ID 不能改名（现为 zhangsan51455），所以两边账号名
+      # 不一致，属正常。
+      # 🔴 依赖仓库 Secrets：DOCKERHUB_USERNAME / DOCKERHUB_TOKEN（PAT 需 Read & Write）。
+      #    缺失时本步骤直接失败 —— 这是故意的，别改成静默跳过。
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v4
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
       - name: Derive tags and labels
         id: meta
         uses: docker/metadata-action@v6
         with:
-          images: ${{ env.IMAGE }}
+          # 一次构建、多处推送：同一组 tag 同时打到 ghcr 与 Docker Hub
+          images: |
+            ${{ env.IMAGE }}
+            docker.io/${{ secrets.DOCKERHUB_USERNAME }}/bili23download
           tags: |
             # 推 v1.0.1 → 出 v1.0.1（版本号保持带 v 的写法，与 tag 一致）
             type=ref,event=tag
