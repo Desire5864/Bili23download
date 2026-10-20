@@ -161,6 +161,16 @@ ghcr.io/desire5864/bili23download:latest          # 跟随最新一个 v* 标签
 ghcr.io/desire5864/bili23download:sha-<短哈希>     # 每次构建都有，能定位到具体提交
 ```
 
+同一轮构建也会推一份到 Docker Hub 作备用副本，tag 与产物完全一致：
+
+```bash
+docker pull docker.io/zhangsan51455/bili23download:latest
+```
+
+ghcr 拉不动时，把 compose 里的 `image:` 换成上面这个即可。两边的账号名不同
+（`desire5864` vs `zhangsan51455`）是 Docker ID 不可改名导致的，属正常。
+备用源依赖仓库 Secrets `DOCKERHUB_USERNAME` / `DOCKERHUB_TOKEN`。
+
 **升级部署**：
 
 ```bash
