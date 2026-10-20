@@ -147,17 +147,25 @@ QT_QPA_PLATFORM=offscreen python -m pytest
 
 ## 镜像发布
 
-镜像由 GitHub Actions 构建并发布到 GHCR，**打一个 `v*` 标签就自动出一版**：
+镜像由 GitHub Actions 构建并发布到 GHCR，触发口径与 `bdmvtoiso` 一致：
+
+| 触发 | 产出 |
+|---|---|
+| push 到 `main` | `latest` + `sha-<短哈希>`（日常迭代走这条） |
+| 打 `v*` 标签 | `vX.Y.Z` + `sha-<短哈希>`（发版留档；`latest` 仍跟 `main` 走） |
+| 手动触发 | `latest` + `sha-<短哈希>`，可另填一个版本标签 |
+
+所以**改完推 main 就自动出新镜像**，NAS 上 `compose pull` 即可；打标签只是为回滚留一个不可变版本号：
 
 ```bash
 git tag v1.0.2 && git push origin v1.0.2
 ```
 
-产出三个标签：
+标签含义：
 
 ```
 ghcr.io/desire5864/bili23download:v1.0.2          # 精确版本，内容不可变，回滚用这个
-ghcr.io/desire5864/bili23download:latest          # 跟随最新一个 v* 标签
+ghcr.io/desire5864/bili23download:latest          # 跟随 main 最新一次提交
 ghcr.io/desire5864/bili23download:sha-<短哈希>     # 每次构建都有，能定位到具体提交
 ```
 
