@@ -2108,6 +2108,49 @@ cloud_sync_schedule.configure(
     is_enabled = lambda: bool(config.get(config.cloud_sync_auto)),
 )
 
+# 已经排查过的 Cookie 头（存哈希，不留原文）。同一个头只分析一次，
+# 避免面板每 3 秒轮询都给日志刷一遍
+_inspected_cookie_headers: set = set()
+
+def inspect_cookie_header(raw: str):
+    """
+    指认 Cookie 头里哪几项单独就解析不了
+
+    定位用。原来整行交给 SimpleCookie，一项不合格整行抛异常，却看不出是哪项。
+    这里逐条单独过一遍：能单独解析的说明自身没问题，抛异常的就是嫌疑项。
+    只记名字与异常类型，不落值 —— Cookie 里有别家服务的凭据
+    """
+    if not raw:
+        return
+
+    digest = hash(raw)
+
+    if digest in _inspected_cookie_headers:
+        return
+
+    _inspected_cookie_headers.add(digest)
+
+    # 面板常开很久，头的内容会变（各服务陆续登录），别让这个集合无限长
+    if len(_inspected_cookie_headers) > 500:
+        _inspected_cookie_headers.clear()
+
+    bad = []
+
+    for part in raw.split(";"):
+        part = part.strip()
+
+        if not part:
+            continue
+
+        try:
+            SimpleCookie(part)
+
+        except Exception as exc:
+            bad.append((part.partition("=")[0].strip()[:24], type(exc).__name__))
+
+    if bad:
+        logger.warning("Cookie 头里有 %d 项无法单独解析（不落值）：%r", len(bad), bad)
+
 class WebPanelHandler(BaseHTTPRequestHandler):
     # 该值会出现在响应的 Server 头里
     server_version = "Bili23-Panel"
@@ -2465,6 +2508,12 @@ class WebPanelHandler(BaseHTTPRequestHandler):
         令牌那条路是留给脚本与自动化的：它不方便先登录拿 Cookie。
         两个入口共用一套鉴权判定，不各自开一套
         """
+        raw = self.headers.get("Cookie") or ""
+
+        # 无论鉴权成不成功都过一遍：修复后正常请求也不会 401，
+        # 只在失败时检查就再也看不到那些坏项了
+        inspect_cookie_header(raw)
+
         session = self.cookie(SESSION_COOKIE)
 
         if session and self.server.sessions.validate(session):
@@ -2473,29 +2522,10 @@ class WebPanelHandler(BaseHTTPRequestHandler):
         if self.token_authenticated():
             return True
 
-        # 只在"发了 Cookie 却取不到会话项"时记一笔：正常的未登录访问不该刷屏，
-        # 而这种情形说明解析或写入出了问题。逐条单独过一遍解析，就能指认是哪一项
-        # 把整行拖垮的（只记名字与异常类型，不落值）
-        raw = self.headers.get("Cookie") or ""
-
         if raw and not session:
-            bad = []
-
-            for part in raw.split(";"):
-                part = part.strip()
-
-                if not part:
-                    continue
-
-                try:
-                    SimpleCookie(part)
-
-                except Exception as exc:
-                    bad.append((part.partition("=")[0].strip()[:24], type(exc).__name__))
-
             logger.warning(
-                "Cookie 头有内容但取不到会话项 path=%s 共%d条 长度=%d 坏项=%r",
-                self.path.partition("?")[0], raw.count("="), len(raw), bad,
+                "Cookie 头有内容但取不到会话项 path=%s 共%d条 长度=%d",
+                self.path.partition("?")[0], raw.count("="), len(raw),
             )
 
         return False
