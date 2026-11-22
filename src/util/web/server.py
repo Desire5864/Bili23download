@@ -2122,6 +2122,16 @@ class WebPanelHandler(BaseHTTPRequestHandler):
 
         super().__init__(*args, **kwargs)
 
+    def send_response(self, code, message=None):
+        super().send_response(code, message)
+
+        # protocol_version 声明了 HTTP/1.1，但本服务端处理完一个请求就关连接
+        # （见 handle_one_request 的 finally）。两边不一致时浏览器会按长连接
+        # 复用，把下一个请求发进已经关闭的 socket —— 表现为请求挂起，或者上一个
+        # 响应刚下来下一个就失败。登录后紧接着的会话校验最容易撞上，用户看到的
+        # 就是「输对密码也进不去」。显式声明 close 后浏览器每次都会新建连接
+        self.send_header("Connection", "close")
+
     def handle_one_request(self):
         try:
             super().handle_one_request()
