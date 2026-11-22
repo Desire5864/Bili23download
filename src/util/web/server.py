@@ -2474,14 +2474,28 @@ class WebPanelHandler(BaseHTTPRequestHandler):
             return True
 
         # 只在"发了 Cookie 却取不到会话项"时记一笔：正常的未登录访问不该刷屏，
-        # 而这种情形说明解析或写入出了问题。只记条数与长度，不落 Cookie 值
+        # 而这种情形说明解析或写入出了问题。逐条单独过一遍解析，就能指认是哪一项
+        # 把整行拖垮的（只记名字与异常类型，不落值）
         raw = self.headers.get("Cookie") or ""
 
         if raw and not session:
+            bad = []
+
+            for part in raw.split(";"):
+                part = part.strip()
+
+                if not part:
+                    continue
+
+                try:
+                    SimpleCookie(part)
+
+                except Exception as exc:
+                    bad.append((part.partition("=")[0].strip()[:24], type(exc).__name__))
+
             logger.warning(
-                "Cookie 头有内容但取不到会话项 path=%s 条数=%d 长度=%d UA=%r",
-                self.path.partition("?")[0], raw.count("="), len(raw),
-                (self.headers.get("User-Agent") or "")[:70],
+                "Cookie 头有内容但取不到会话项 path=%s 共%d条 长度=%d 坏项=%r",
+                self.path.partition("?")[0], raw.count("="), len(raw), bad,
             )
 
         return False
