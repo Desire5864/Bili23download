@@ -2473,14 +2473,16 @@ class WebPanelHandler(BaseHTTPRequestHandler):
         if self.token_authenticated():
             return True
 
-        # 临时诊断：分不清"浏览器没发 Cookie"和"发了但服务端没认出来"时，
-        # 这一行能直接给出答案。只记 cookie 的有无与条数，不落值
+        # 只在"发了 Cookie 却取不到会话项"时记一笔：正常的未登录访问不该刷屏，
+        # 而这种情形说明解析或写入出了问题。只记条数与长度，不落 Cookie 值
         raw = self.headers.get("Cookie") or ""
-        logger.info(
-            "DIAG 鉴权未通过 path=%s 有Cookie=%s 条数=%d 长度=%d UA=%r",
-            self.path.partition("?")[0], bool(raw), raw.count("="), len(raw),
-            (self.headers.get("User-Agent") or "")[:70],
-        )
+
+        if raw and not session:
+            logger.warning(
+                "Cookie 头有内容但取不到会话项 path=%s 条数=%d 长度=%d UA=%r",
+                self.path.partition("?")[0], raw.count("="), len(raw),
+                (self.headers.get("User-Agent") or "")[:70],
+            )
 
         return False
 
@@ -2504,16 +2506,29 @@ class WebPanelHandler(BaseHTTPRequestHandler):
         return self.server.sessions.validate(self.cookie(SESSION_COOKIE))
 
     def cookie(self, name: str) -> str:
-        try:
-            jar = SimpleCookie(self.headers.get("Cookie", ""))
+        """
+        从 Cookie 头里取出指定项
 
-        except Exception:
-            # Cookie 头是客户端随口给的，畸形输入属于正常情况
-            return ""
+        不用 SimpleCookie：它按 RFC 逐项校验，整行只要有一条不合格就抛
+        CookieError，连累到我们要的那一条。局域网里同一个主机名往往挂着好几个
+        服务（NAS 上就是 fnOS、网盘、下载器共用同一个 IP），它们的 Cookie 全挤在
+        同一行里，谁写歪一点都可能 —— 实测中文名、空名、引号未闭合都会让整行解析
+        失败，表现为「登录成功却立刻要求重新登录」，而且没有任何报错
 
-        morsel = jar.get(name)
+        这里按分号切开逐项比对，只认名字完全相等的那一条。同名多条时后写的覆盖
+        先写的：带 /api 前缀的旧会话排在前面，path=/ 的当前会话在后面
+        """
+        raw = self.headers.get("Cookie", "") or ""
 
-        return morsel.value if morsel else ""
+        value = ""
+
+        for part in raw.split(";"):
+            key, sep, val = part.partition("=")
+
+            if sep and key.strip() == name:
+                value = val.strip()
+
+        return value.strip('"')
 
     def set_cookie(self, name: str, value: str, max_age: int = 0):
         jar = SimpleCookie()
