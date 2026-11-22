@@ -2470,7 +2470,19 @@ class WebPanelHandler(BaseHTTPRequestHandler):
         if session and self.server.sessions.validate(session):
             return True
 
-        return self.token_authenticated()
+        if self.token_authenticated():
+            return True
+
+        # 临时诊断：分不清"浏览器没发 Cookie"和"发了但服务端没认出来"时，
+        # 这一行能直接给出答案。只记 cookie 的有无与条数，不落值
+        raw = self.headers.get("Cookie") or ""
+        logger.info(
+            "DIAG 鉴权未通过 path=%s 有Cookie=%s 条数=%d 长度=%d UA=%r",
+            self.path.partition("?")[0], bool(raw), raw.count("="), len(raw),
+            (self.headers.get("User-Agent") or "")[:70],
+        )
+
+        return False
 
     def token_authenticated(self) -> bool:
         """
